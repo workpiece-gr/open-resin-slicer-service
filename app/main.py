@@ -13,6 +13,7 @@ from .engine import (
     UVTOOLS_VERSION,
     EngineError,
     Orientation,
+    build_review_bundle,
     compact_metadata,
     slice_native,
 )
@@ -30,7 +31,7 @@ UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
 REJECT_CRITICAL = os.environ.get("REJECT_ON_CRITICAL_UVTOOLS_ISSUES", "1") not in {"0", "false", "False"}
 
 registry = ProfileRegistry(PROFILE_ROOT)
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.2.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.3.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -63,6 +64,7 @@ def health() -> dict:
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
+        "artifact_contract": "source STL -> review 3MF -> intermediate SL1 -> printer-native CTB/GOO",
         "source": SOURCE_CODE_URL,
     }
 
@@ -113,20 +115,22 @@ async def _slice_request(
             uvtools_cmd=UVTOOLS_CMD,
             slice_timeout=SLICE_TIMEOUT,
             uvtools_timeout=UVTOOLS_TIMEOUT,
-            # Candidate jobs remain review artifacts even if UVtools reports issues.
-            # Production jobs fail closed when configured to reject critical issues.
             reject_critical=REJECT_CRITICAL if production else False,
         )
     except (StlValidationError, ProfileError, EngineError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    authority = "production-authoritative" if production else "acceptance-candidate-only"
+    bundle, bundle_filename = build_review_bundle(
+        data, original_name=filename, artifact=artifact, authority=authority
+    )
     metadata = compact_metadata(artifact)
-    authority = "production-candidate" if production else "acceptance-candidate-only"
     critical = sum(artifact.issue_summary.get(k, 0) for k in ("islands", "resin_traps", "suction_cups", "touching_bounds", "empty_layers"))
     headers = {
-        "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+        "Content-Disposition": f'attachment; filename="{bundle_filename}"',
         "X-Workpiece-Authority": authority,
         "X-Workpiece-Source-SHA256": artifact.source_sha256,
+        "X-Workpiece-Project-SHA256": artifact.project_sha256,
         "X-Workpiece-Intermediate-SHA256": artifact.intermediate_sha256,
         "X-Workpiece-Native-SHA256": artifact.native_sha256,
         "X-Workpiece-Printer-Profile": artifact.printer_profile,
@@ -137,7 +141,7 @@ async def _slice_request(
         "X-Workpiece-Resin-Metadata": metadata,
         "Cache-Control": "private, no-store",
     }
-    return Response(content=artifact.bytes, media_type=artifact.media_type, headers=headers)
+    return Response(content=bundle, media_type="application/zip", headers=headers)
 
 
 @app.post("/v1/candidate")
