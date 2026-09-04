@@ -10,9 +10,7 @@ Resin orientation changes peel/release forces, unsupported minima/islands, sucti
 
 ## CP3 decision model
 
-`app/orientation.py` ranks explicit orientation candidates. It deliberately does not pretend to solve candidate generation or metric extraction yet.
-
-Every candidate carries:
+`app/orientation.py` ranks explicit orientation candidates. Every candidate carries:
 
 - XYZ rotation;
 - maximum layer cross-section area;
@@ -26,11 +24,7 @@ Every candidate carries:
 
 ### Hard blockers
 
-Candidates are excluded from automatic selection before soft scoring when they contain any unresolved:
-
-- islands;
-- suction cups;
-- resin traps.
+Candidates are excluded from automatic selection before soft scoring when they contain any unresolved islands, suction cups, or resin traps.
 
 When `require_sliced_validation=True`, geometry-proxy candidates are also excluded. This gives the later authoritative path an explicit way to require measurements derived from an actual supported/sliced candidate rather than browser or raw-mesh estimates.
 
@@ -49,11 +43,26 @@ These weights are deterministic seeds, not Mars 2 calibration results. They must
 
 Ties resolve deterministically by lowest score, then least total rotation, then canonical XYZ angles.
 
+## Deterministic candidate generation
+
+`app/orientation_candidates.py` now supplies a bounded proposal generator. The default set contains 30 unique rotations:
+
+- the source orientation;
+- positive/negative X and Y tilts at 15, 30, and 45 degrees;
+- the four X/Y diagonal combinations at each tilt;
+- the five remaining principal build directions (the source orientation already represents +Z).
+
+The generator is deliberately a proposal layer, not geometry authority. It sorts configured tilt values, de-duplicates canonical rotations, and refuses to generate more than 64 candidates.
+
+Z spin is fixed at zero in generated proposals. Rotating only around Z does not change the resin build direction or peel/support relationship; the later physical-plate planner may choose a Z rotation for capacity after the resin orientation is selected.
+
+This initial bounded lattice does not claim to discover every optimal orientation or preserve every functional face. A later geometry-aware extension may add face-normal or user-protected-surface proposals without changing the scoring/authority schema.
+
 ## Metric authority
 
 Two metric sources are explicit:
 
-- `geometry-proxy`: cheap geometric/layer simulation suitable for generating and pruning proposals;
+- `geometry-proxy`: cheap geometric/layer simulation suitable for screening proposals;
 - `sliced-validation`: metrics derived after the candidate has real support/pad and slice evidence.
 
 The decision manifest always records which source produced each candidate's metrics. `automatic_production_authority` is hard-coded false in this checkpoint.
@@ -65,10 +74,6 @@ The intended long-term flow is:
 ## Surface-finish boundary
 
 Global support contact area is included as a support-scar proxy. Workpiece does not yet know which user surfaces are cosmetic, mating, sealing, threaded, optical, or otherwise protected. Until that semantic surface data exists, the orientation decision must remain reviewable by a human and must not claim to optimize functional/cosmetic scar placement automatically.
-
-## Candidate generation is intentionally separate
-
-CP3 does not hard-code a universal 45-degree orientation or a fixed grid of rotations. A good candidate generator should preserve useful planar/functional faces while exploring enough tilt directions to expose lower cross-section and lower-risk solutions. Keeping candidate generation separate lets us improve sampling without changing the authority/scoring schema.
 
 ## Design basis
 
@@ -82,4 +87,4 @@ These sources are design guidance, not validation of the Workpiece weights or th
 
 ## Next integration step
 
-Implement bounded deterministic candidate generation and a metric-extraction layer. Geometry-proxy screening can happen without invoking the expensive full container path. Finalists should then be materialized with the real Prusa support/pad configuration and inspected from actual slice evidence before the selected orientation is allowed into the plate planner.
+Add a bounded metric-extraction layer for geometry-proxy screening. Finalists should then be materialized with the real Prusa support/pad configuration and inspected from actual slice evidence before the selected orientation is allowed into the plate planner.
