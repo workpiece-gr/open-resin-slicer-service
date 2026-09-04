@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git build-essential autoconf cmake libglu1-mesa-dev libgtk-3-dev \
+    git build-essential autoconf automake cmake libglu1-mesa-dev libgtk-3-dev \
     libdbus-1-dev libwebkit2gtk-4.1-dev libncurses-dev texinfo ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/prusa3d/PrusaSlicer.git /src/PrusaSlicer \
