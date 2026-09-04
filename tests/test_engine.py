@@ -1,8 +1,20 @@
+import io
+import json
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from app.engine import EngineError, Orientation, build_prusa_command, critical_issue_count, parse_uvtools_issues
+from app.engine import (
+    EngineError,
+    NativeArtifact,
+    Orientation,
+    build_prusa_project_command,
+    build_prusa_slice_command,
+    build_review_bundle,
+    critical_issue_count,
+    parse_uvtools_issues,
+)
 from app.profiles import Profile
 
 
@@ -10,11 +22,11 @@ def profile(pid, kind, path, **metadata):
     return Profile(pid, kind, pid, True, True, Path(path), {"id": pid, **metadata})
 
 
-def test_prusa_command_loads_locked_profiles_and_explicit_orientation():
-    command = build_prusa_command(
+def test_prusa_project_command_loads_locked_profiles_and_explicit_orientation():
+    command = build_prusa_project_command(
         "/opt/prusa",
         Path("/tmp/in.stl"),
-        Path("/tmp/out.sl1"),
+        Path("/tmp/review.3mf"),
         profile("p", "printer", "/profiles/p.ini"),
         profile("r", "resin", "/profiles/r.ini"),
         profile("q", "quality", "/profiles/q.ini"),
@@ -22,8 +34,62 @@ def test_prusa_command_loads_locked_profiles_and_explicit_orientation():
     )
     assert command[:7] == ["/opt/prusa", "--load", "/profiles/p.ini", "--load", "/profiles/r.ini", "--load", "/profiles/q.ini"]
     assert ["--rotate-x", "10"] == command[7:9]
-    assert "--export-sla" in command
+    assert "--export-3mf" in command
     assert command[-1] == "/tmp/in.stl"
+
+
+def test_prusa_slice_command_uses_exact_project_without_profile_reload():
+    command = build_prusa_slice_command(
+        "/opt/prusa", Path("/tmp/review.3mf"), Path("/tmp/out.sl1")
+    )
+    assert command == [
+        "/opt/prusa", "--export-sla", "--output", "/tmp/out.sl1", "/tmp/review.3mf"
+    ]
+    assert "--load" not in command
+    assert "--rotate" not in command
+
+
+def test_review_bundle_contains_provenance_artifacts_and_manifest():
+    artifact = NativeArtifact(
+        project_bytes=b"project",
+        project_filename="part-workpiece-review.3mf",
+        project_sha256="project-sha",
+        intermediate_bytes=b"sl1",
+        intermediate_filename="part-workpiece-intermediate.sl1",
+        bytes=b"ctb",
+        filename="part-workpiece.ctb",
+        media_type="application/octet-stream",
+        source_sha256="source-sha",
+        intermediate_sha256="sl1-sha",
+        native_sha256="ctb-sha",
+        issue_summary={"islands": 0},
+        issue_text="Islands: 0\n",
+        printer_profile="elegoo-mars-2",
+        resin_profile="elegoo-water-washable-grey",
+        quality_profile="balanced-0p05-medium",
+        orientation=Orientation(15, 0, 25),
+    )
+    bundle, filename = build_review_bundle(
+        b"stl", original_name="part.stl", artifact=artifact, authority="acceptance-candidate-only"
+    )
+    assert filename == "part-workpiece-resin-bundle.zip"
+    with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
+        names = set(zf.namelist())
+        assert names == {
+            "part-source.stl",
+            "part-workpiece-review.3mf",
+            "part-workpiece-intermediate.sl1",
+            "part-workpiece.ctb",
+            "uvtools-issues.txt",
+            "manifest.json",
+        }
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["provenance_chain"] == [
+        "source_stl", "review_3mf", "intermediate_sl1", "printer_native"
+    ]
+    assert manifest["files"]["review_3mf"]["sha256"] == "project-sha"
+    assert manifest["files"]["printer_native"]["sha256"] == "ctb-sha"
+    assert "If the 3MF is edited" in manifest["review_rule"]
 
 
 def test_orientation_is_bounded():
