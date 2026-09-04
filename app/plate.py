@@ -48,16 +48,34 @@ class PlatePlan:
     def plate_count(self) -> int:
         return len(self.plates)
 
+    @property
+    def placed_footprint_width_mm(self) -> float:
+        return self.instance_footprint_depth_mm if self.rotation_z_deg == 90 else self.instance_footprint_width_mm
+
+    @property
+    def placed_footprint_depth_mm(self) -> float:
+        return self.instance_footprint_width_mm if self.rotation_z_deg == 90 else self.instance_footprint_depth_mm
+
 
 def _positive_finite(name: str, value: float) -> float:
-    value = float(value)
+    if isinstance(value, bool):
+        raise PlatePlanError(f"{name} must be a positive finite number.")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PlatePlanError(f"{name} must be a positive finite number.") from exc
     if not math.isfinite(value) or value <= 0:
         raise PlatePlanError(f"{name} must be a positive finite number.")
     return value
 
 
 def _nonnegative_finite(name: str, value: float) -> float:
-    value = float(value)
+    if isinstance(value, bool):
+        raise PlatePlanError(f"{name} must be a non-negative finite number.")
+    try:
+        value = float(value)
+    except (TypeError, ValueError) as exc:
+        raise PlatePlanError(f"{name} must be a non-negative finite number.") from exc
     if not math.isfinite(value) or value < 0:
         raise PlatePlanError(f"{name} must be a non-negative finite number.")
     return value
@@ -98,7 +116,14 @@ def plan_rectangular_instances(
 ) -> PlatePlan:
     """Create a deterministic physical-plate plan from a supported-part XY envelope.
 
-    Coordinates are instance centers in millimetres from the plate's lower-left origin.
+    ``plate_width_mm`` and ``plate_depth_mm`` must describe the validated printable
+    manufacturing envelope, not merely the LCD/display dimensions.
+
+    Coordinates are target centres of the final supported-part XY envelope, measured
+    in millimetres from the plate's lower-left origin. They are not raw mesh-origin
+    translations: slicer integration must derive the real object transform from the
+    oriented/supported envelope and verify the resulting bounds after applying it.
+
     The planner uses a fixed row-major grid and applies the same Z rotation to every
     instance. A 90 degree rotation is chosen only when it strictly increases capacity.
     """
@@ -178,7 +203,14 @@ def plate_plan_manifest(plan: PlatePlan) -> dict:
         "schema": "workpiece-resin-plate-plan-v1",
         "strategy": "deterministic-row-major",
         "artifact_rule": "one physical plate -> one review project -> one printer-native file",
-        "coordinate_system": "millimetres from lower-left plate origin; placements are instance centres",
+        "coordinate_system": "millimetres from lower-left plate origin; placements are target envelope centres",
+        "placement_semantics": (
+            "x_mm/y_mm are target centres of the final supported XY envelope, not raw mesh-origin translations; "
+            "the slicer integration must derive and verify the actual object transform"
+        ),
+        "plate_envelope_rule": (
+            "plate dimensions must describe a validated printable manufacturing envelope, not raw LCD/display dimensions"
+        ),
         "plate": {
             "width_mm": plan.plate_width_mm,
             "depth_mm": plan.plate_depth_mm,
@@ -188,6 +220,11 @@ def plate_plan_manifest(plan: PlatePlan) -> dict:
         "source_instance_footprint_mm": {
             "width": plan.instance_footprint_width_mm,
             "depth": plan.instance_footprint_depth_mm,
+            "semantics": "final supported XY envelope before the optional common 90-degree plate rotation",
+        },
+        "placed_instance_footprint_mm": {
+            "width": plan.placed_footprint_width_mm,
+            "depth": plan.placed_footprint_depth_mm,
         },
         "layout": {
             "rotation_z_deg": plan.rotation_z_deg,
