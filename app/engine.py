@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import tempfile
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -37,6 +39,11 @@ class Orientation:
 
 @dataclass(frozen=True)
 class NativeArtifact:
+    project_bytes: bytes
+    project_filename: str
+    project_sha256: str
+    intermediate_bytes: bytes
+    intermediate_filename: str
     bytes: bytes
     filename: str
     media_type: str
@@ -55,6 +62,10 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _safe_stem(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name).stem).strip("-._") or "workpiece"
+
+
 def _run(command: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -70,6 +81,53 @@ def _run(command: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess
         raise EngineError(f"External resin engine timed out after {timeout} seconds.") from exc
 
 
+def _profile_args(printer: Profile, resin: Profile, quality: Profile) -> list[str]:
+    return [
+        "--load", str(printer.config),
+        "--load", str(resin.config),
+        "--load", str(quality.config),
+    ]
+
+
+def _orientation_args(orientation: Orientation) -> list[str]:
+    orientation.validate()
+    return [
+        "--rotate-x", f"{orientation.x:g}",
+        "--rotate-y", f"{orientation.y:g}",
+        "--rotate", f"{orientation.z:g}",
+    ]
+
+
+def build_prusa_project_command(
+    prusa_bin: str,
+    input_stl: Path,
+    output_3mf: Path,
+    printer: Profile,
+    resin: Profile,
+    quality: Profile,
+    orientation: Orientation,
+) -> list[str]:
+    """Build the exact review project first; every later artifact derives from this 3MF."""
+    return [
+        prusa_bin,
+        *_profile_args(printer, resin, quality),
+        *_orientation_args(orientation),
+        "--export-3mf",
+        "--output", str(output_3mf),
+        str(input_stl),
+    ]
+
+
+def build_prusa_slice_command(prusa_bin: str, input_project: Path, output_sl1: Path) -> list[str]:
+    """Slice the retained 3MF itself. Do not reload profiles or reapply transforms here."""
+    return [
+        prusa_bin,
+        "--export-sla",
+        "--output", str(output_sl1),
+        str(input_project),
+    ]
+
+
 def build_prusa_command(
     prusa_bin: str,
     input_stl: Path,
@@ -79,15 +137,11 @@ def build_prusa_command(
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    orientation.validate()
+    """Legacy helper retained for callers/tests; new production path is 3MF-first."""
     return [
         prusa_bin,
-        "--load", str(printer.config),
-        "--load", str(resin.config),
-        "--load", str(quality.config),
-        "--rotate-x", f"{orientation.x:g}",
-        "--rotate-y", f"{orientation.y:g}",
-        "--rotate", f"{orientation.z:g}",
+        *_profile_args(printer, resin, quality),
+        *_orientation_args(orientation),
         "--export-sla",
         "--output", str(output_sl1),
         str(input_stl),
@@ -109,7 +163,6 @@ def parse_uvtools_issues(text: str) -> dict[str, int]:
     for key, terms in categories.items():
         count = 0
         for term in terms:
-            # UVtools output varies by version; accept "term: 12" / "12 term(s)" forms.
             matches = re.findall(rf"{re.escape(term)}s?[ \t]*[:=][ \t]*(\d+)", lower)
             matches += re.findall(rf"(\d+)[ \t]+{re.escape(term)}s?\b", lower)
             if matches:
@@ -147,26 +200,50 @@ def slice_native(
     if not shutil.which(uvtools_cmd) and not Path(uvtools_cmd).is_file():
         raise EngineError("Pinned UVtoolsCmd binary is unavailable.")
 
+    orientation.validate()
+    safe_stem = _safe_stem(original_name)
+
     with tempfile.TemporaryDirectory(prefix="workpiece-resin-") as temp:
         root = Path(temp)
         input_path = root / "source.stl"
+        project_path = root / "review.3mf"
         intermediate_path = root / "production.sl1"
         native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
-        prusa = _run(
-            build_prusa_command(prusa_bin, input_path, intermediate_path, printer, resin, quality, orientation),
+        # 1) Build the human-review project. It carries model placement/orientation and
+        #    the exact printer/material/quality settings used for subsequent slicing.
+        project = _run(
+            build_prusa_project_command(
+                prusa_bin, input_path, project_path, printer, resin, quality, orientation
+            ),
             timeout=slice_timeout,
         )
-        if prusa.returncode != 0:
-            raise EngineError(f"PrusaSlicer failed: {prusa.stdout[-2000:]}")
+        if project.returncode != 0:
+            raise EngineError(f"PrusaSlicer 3MF project export failed: {project.stdout[-2000:]}")
+        if not project_path.is_file() or project_path.stat().st_size == 0:
+            candidates = list(root.glob("*.3mf"))
+            if len(candidates) == 1:
+                project_path = candidates[0]
+            else:
+                raise EngineError("PrusaSlicer did not produce the expected review 3MF project.")
+
+        # 2) Slice the exact retained 3MF, with no second profile load or transform pass.
+        #    This makes the project hash part of the authoritative provenance chain.
+        sliced = _run(
+            build_prusa_slice_command(prusa_bin, project_path, intermediate_path),
+            timeout=slice_timeout,
+        )
+        if sliced.returncode != 0:
+            raise EngineError(f"PrusaSlicer SLA export from review 3MF failed: {sliced.stdout[-2000:]}")
         if not intermediate_path.is_file() or intermediate_path.stat().st_size == 0:
             candidates = list(root.glob("*.sl1")) + list(root.glob("*.sl1s"))
             if len(candidates) == 1:
                 intermediate_path = candidates[0]
             else:
-                raise EngineError("PrusaSlicer did not produce the expected SLA archive.")
+                raise EngineError("PrusaSlicer did not produce the expected SLA archive from the review 3MF.")
 
+        # 3) Convert to the exact printer-native file and inspect it.
         conversion = _run(
             [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
             timeout=uvtools_timeout,
@@ -182,10 +259,15 @@ def slice_native(
         if reject_critical and critical_issue_count(issues) > 0:
             raise EngineError("UVtools found critical resin-print issues; human review/correction is required.")
 
+        project_bytes = project_path.read_bytes()
         intermediate = intermediate_path.read_bytes()
         native = native_path.read_bytes()
-        safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(original_name).stem).strip("-._") or "workpiece"
         return NativeArtifact(
+            project_bytes=project_bytes,
+            project_filename=f"{safe_stem}-workpiece-review.3mf",
+            project_sha256=_sha(project_bytes),
+            intermediate_bytes=intermediate,
+            intermediate_filename=f"{safe_stem}-workpiece-intermediate.sl1",
             bytes=native,
             filename=f"{safe_stem}-workpiece.{native_format}",
             media_type="application/octet-stream",
@@ -201,10 +283,67 @@ def slice_native(
         )
 
 
+def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authority: str) -> dict:
+    return {
+        "schema": "workpiece-resin-bundle-v1",
+        "authority": authority,
+        "provenance_chain": ["source_stl", "review_3mf", "intermediate_sl1", "printer_native"],
+        "engine": {
+            "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT},
+            "uvtools": {"version": UVTOOLS_VERSION},
+        },
+        "profiles": {
+            "printer": artifact.printer_profile,
+            "resin": artifact.resin_profile,
+            "quality": artifact.quality_profile,
+        },
+        "orientation_deg": {
+            "x": artifact.orientation.x,
+            "y": artifact.orientation.y,
+            "z": artifact.orientation.z,
+        },
+        "files": {
+            "source_stl": {"name": source_filename, "sha256": artifact.source_sha256},
+            "review_3mf": {"name": artifact.project_filename, "sha256": artifact.project_sha256},
+            "intermediate_sl1": {"name": artifact.intermediate_filename, "sha256": artifact.intermediate_sha256},
+            "printer_native": {"name": artifact.filename, "sha256": artifact.native_sha256},
+            "uvtools_issues": {"name": "uvtools-issues.txt"},
+        },
+        "issues": artifact.issue_summary,
+        "review_rule": (
+            "The CTB is valid only for this exact review 3MF hash. If the 3MF is edited, "
+            "do not print the bundled CTB; regenerate the bundle from the revised project."
+        ),
+    }
+
+
+def _zip_write(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
+    info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+    info.compress_type = zipfile.ZIP_DEFLATED
+    info.external_attr = 0o644 << 16
+    zf.writestr(info, data)
+
+
+def build_review_bundle(source: bytes, *, original_name: str, artifact: NativeArtifact, authority: str) -> tuple[bytes, str]:
+    safe_stem = _safe_stem(original_name)
+    source_filename = f"{safe_stem}-source.stl"
+    manifest = artifact_manifest(artifact, source_filename=source_filename, authority=authority)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        _zip_write(zf, source_filename, source)
+        _zip_write(zf, artifact.project_filename, artifact.project_bytes)
+        _zip_write(zf, artifact.intermediate_filename, artifact.intermediate_bytes)
+        _zip_write(zf, artifact.filename, artifact.bytes)
+        _zip_write(zf, "uvtools-issues.txt", artifact.issue_text.encode("utf-8", errors="replace"))
+        _zip_write(zf, "manifest.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
+    return buffer.getvalue(), f"{safe_stem}-workpiece-resin-bundle.zip"
+
+
 def compact_metadata(artifact: NativeArtifact) -> str:
     payload = {
         "engine": {"prusaslicer": PRUSA_SLICER_VERSION, "uvtools": UVTOOLS_VERSION},
         "source_sha256": artifact.source_sha256,
+        "project_sha256": artifact.project_sha256,
         "intermediate_sha256": artifact.intermediate_sha256,
         "native_sha256": artifact.native_sha256,
         "printer_profile": artifact.printer_profile,
