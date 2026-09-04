@@ -1,26 +1,56 @@
 import json
 from pathlib import Path
 
+import pytest
 
-def test_mars2_is_candidate_only_and_no_resin_tuple_is_approved_yet():
+from app.profiles import ProfileError, ProfileRegistry
+
+
+def test_mars2_grey_tuple_is_candidate_only():
     root = Path(__file__).parents[1]
     printer = json.loads((root / "profiles/printers/elegoo-mars-2.json").read_text("utf-8"))
+    resin = json.loads((root / "profiles/resins/elegoo-water-washable-grey.json").read_text("utf-8"))
     compatibility = json.loads((root / "profiles/compatibility.json").read_text("utf-8"))
+    combo = ["elegoo-mars-2", "elegoo-water-washable-grey", "balanced-0p05-medium"]
+
     assert printer["candidate_ready"] is True
     assert printer["production_ready"] is False
     assert printer["display_pixels_x"] == 1620
     assert printer["display_pixels_y"] == 2560
     assert printer["max_print_height_mm"] == 150
-    assert compatibility["candidate_combinations"] == []
+
+    assert resin["candidate_ready"] is True
+    assert resin["production_ready"] is False
+    assert resin["candidate_seed"]["normal_exposure_s"] == 2.75
+    assert resin["candidate_seed"]["initial_exposure_s"] == 30
+    assert resin["manufacturer_range"]["normal_exposure_s"] == [2.5, 3.0]
+    assert resin["manufacturer_range"]["initial_exposure_s"] == [25, 35]
+
+    assert combo in compatibility["candidate_combinations"]
     assert compatibility["production_combinations"] == []
 
+    registry = ProfileRegistry(root / "profiles")
+    profiles = registry.resolve_candidate(*combo)
+    assert [profile.id for profile in profiles] == combo
+    with pytest.raises(ProfileError, match="not validated for production"):
+        registry.resolve_production(*combo)
 
-def test_water_washable_reference_requires_color():
+
+def test_grey_prusaslicer_material_seed_matches_metadata():
+    root = Path(__file__).parents[1]
+    ini = (root / "profiles/resins/elegoo-water-washable-grey.ini").read_text("utf-8")
+    assert "exposure_time = 2.75" in ini
+    assert "initial_exposure_time = 30" in ini
+    assert "initial_layer_height = 0.05" in ini
+
+
+def test_water_washable_reference_preserves_other_color_ranges():
     root = Path(__file__).parents[1]
     reference = json.loads((root / "profiles/reference/elegoo-water-washable-v1.json").read_text("utf-8"))
     assert reference["status"] == "reference-only-color-required"
     assert reference["manufacturer_ranges"]["black"]["normal_exposure_s"] == [3.0, 3.5]
     assert reference["manufacturer_ranges"]["ceramic-grey"]["normal_exposure_s"] == [2.5, 3.0]
+    assert reference["manufacturer_ranges"]["clear-blue"]["normal_exposure_s"] == [2.5, 3.0]
 
 
 def test_dockerfile_pins_both_engines_and_uvtools_hash():
