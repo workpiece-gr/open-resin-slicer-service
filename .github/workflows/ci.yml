@@ -87,24 +87,45 @@ jobs:
           import zipfile
           from pathlib import Path
 
+          source = Path('acceptance-cube.stl').read_bytes()
           bundle = Path('acceptance-bundle.zip').read_bytes()
           with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
               manifest = json.loads(zf.read('manifest.json'))
               assert manifest['authority'] == 'acceptance-candidate-only'
               assert manifest['provenance_chain'] == ['source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native']
+              assert manifest['profiles'] == {
+                  'printer': 'elegoo-mars-2',
+                  'resin': 'elegoo-water-washable-grey',
+                  'quality': 'balanced-0p05-medium',
+              }
+              assert manifest['orientation_deg'] == {'x': 15, 'y': 0, 'z': 25}
+              assert manifest['engine'] == {
+                  'prusaslicer': {
+                      'version': '2.9.6',
+                      'commit': 'b028299c770b8380ee81c921a2867d522f288123',
+                  },
+                  'uvtools': {'version': '6.2.0'},
+              }
+
               files = manifest['files']
+              payloads = {}
               for key in ('source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native'):
                   name = files[key]['name']
                   payload = zf.read(name)
+                  payloads[key] = payload
                   assert payload, f'{key} is empty'
                   assert hashlib.sha256(payload).hexdigest() == files[key]['sha256']
+
+              assert payloads['source_stl'] == source, 'bundled source STL differs from request source bytes'
               assert files['review_3mf']['name'].endswith('.3mf')
+              assert files['intermediate_sl1']['name'].endswith(('.sl1', '.sl1s'))
               assert files['printer_native']['name'].endswith('.ctb')
-              project = zf.read(files['review_3mf']['name'])
-              native_name = files['printer_native']['name']
+
+              project = payloads['review_3mf']
               Path('acceptance-out').mkdir(exist_ok=True)
               Path('acceptance-out/review.3mf').write_bytes(project)
-              Path('acceptance-out/print.ctb').write_bytes(zf.read(native_name))
+              Path('acceptance-out/intermediate.sl1').write_bytes(payloads['intermediate_sl1'])
+              Path('acceptance-out/print.ctb').write_bytes(payloads['printer_native'])
               Path('acceptance-out/manifest.json').write_bytes(zf.read('manifest.json'))
               Path('acceptance-out/uvtools-issues.txt').write_bytes(zf.read('uvtools-issues.txt'))
 
@@ -131,6 +152,50 @@ jobs:
             workpiece-resin-slicer:acceptance \
             print-properties /work/print.ctb > acceptance-out/ctb-properties.txt
           cat acceptance-out/ctb-properties.txt
+
+      - name: Regenerate exact retained 3MF
+        run: |
+          docker run --rm \
+            -v "$PWD/acceptance-out:/work:rw" \
+            --entrypoint /opt/prusaslicer/prusa-slicer \
+            workpiece-resin-slicer:acceptance \
+            --export-sla --output /work/intermediate-repeat.sl1 /work/review.3mf
+          test -s acceptance-out/intermediate-repeat.sl1
+
+          docker run --rm \
+            -v "$PWD/acceptance-out:/work:rw" \
+            --entrypoint /opt/uvtools/UVtoolsCmd \
+            workpiece-resin-slicer:acceptance \
+            convert /work/intermediate-repeat.sl1 CTB /work/print-repeat.ctb
+          test -s acceptance-out/print-repeat.ctb
+
+      - name: Verify SL1 semantic determinism
+        run: |
+          python3 scripts/verify_sl1_semantics.py \
+            acceptance-out/intermediate.sl1 \
+            acceptance-out/intermediate-repeat.sl1 \
+            | tee acceptance-out/sl1-semantic-compare.txt
+
+      - name: Verify CTB semantic determinism with pinned UVtools
+        run: |
+          set +e
+          docker run --rm \
+            -v "$PWD/acceptance-out:/work:rw" \
+            --entrypoint /opt/uvtools/UVtoolsCmd \
+            workpiece-resin-slicer:acceptance \
+            compare /work/print.ctb /work/print-repeat.ctb --full-mode --no-progress \
+            > acceptance-out/ctb-semantic-compare.txt 2>&1
+          compare_status=$?
+          set -e
+          cat acceptance-out/ctb-semantic-compare.txt
+          python3 - <<'PY'
+          from pathlib import Path
+
+          text = Path('acceptance-out/ctb-semantic-compare.txt').read_text(errors='replace').rstrip()
+          assert text.endswith('Files matches'), text
+          print('UVtools semantic comparison matched; command exit status is recorded separately by the shell.')
+          PY
+          echo "UVtools compare exit status: ${compare_status}" >> acceptance-out/ctb-semantic-compare.txt
 
       - name: Upload real acceptance artifacts
         uses: actions/upload-artifact@v4
