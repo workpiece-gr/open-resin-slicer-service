@@ -1,0 +1,11 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+.env
+*.sl1
+*.sl1s
+*.ctb
+*.goo
+*.zip
+*.stl

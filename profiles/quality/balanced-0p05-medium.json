@@ -1,0 +1,11 @@
+{
+  "id": "balanced-0p05-medium",
+  "label": "Balanced 0.05 mm · medium supports",
+  "candidate_ready": true,
+  "production_ready": false,
+  "calibration_status": "upstream-profile-imported; Mars-2 acceptance pending",
+  "layer_height_mm": 0.05,
+  "support_preset": "medium",
+  "config": "quality/balanced-0p05-medium.ini",
+  "source": "UVtools PrusaSlicer/sla_print/Universal 0.05 - Medium Supports.ini"
+}

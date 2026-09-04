@@ -1,0 +1,19 @@
+name: Resin Slicer CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: pip install -r requirements-dev.txt
+      - run: pytest -q
+
+  # Intentionally not enabled until the first dedicated container acceptance pass.
+  # PrusaSlicer builds its dependency bundle from source and requires substantial RAM/time.

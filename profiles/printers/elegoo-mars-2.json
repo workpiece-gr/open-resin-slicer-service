@@ -1,0 +1,23 @@
+{
+  "id": "elegoo-mars-2",
+  "label": "ELEGOO Mars 2 (acceptance profile)",
+  "manufacturer": "ELEGOO",
+  "model": "Mars 2",
+  "candidate_ready": true,
+  "production_ready": false,
+  "calibration_status": "machine-profile-source-verified; physical-acceptance-pending",
+  "native_format": "ctb",
+  "uvtools_target": "auto",
+  "file_version": 4,
+  "config": "printers/elegoo-mars-2.ini",
+  "display_pixels_x": 1620,
+  "display_pixels_y": 2560,
+  "display_width_mm": 82.62,
+  "display_height_mm": 130.56,
+  "max_print_height_mm": 150,
+  "wavelength_nm": 405,
+  "sources": {
+    "elegoo_current_product": "Mars 2: 1620x2560, XY 0.05 mm, build volume 129x80x150 mm, 405 nm",
+    "uvtools_profile_basis": "Elegoo Mars 2 Pro.ini: display 82.62x130.56, mirror X, CTB v4, lift/retract custom values"
+  }
+}

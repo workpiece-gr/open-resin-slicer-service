@@ -1,0 +1,28 @@
+{
+  "id": "elegoo-water-washable-v1",
+  "manufacturer": "ELEGOO",
+  "family": "Water Washable Resin",
+  "printer": "Mars 2 / Mars 2 Pro",
+  "layer_height_mm": 0.05,
+  "status": "reference-only-color-required",
+  "environment_note": "ELEGOO settings sheet recommends roughly 25-30 C printing environment; calibrate on the actual machine.",
+  "common_motion_seed": {
+    "lift_distance_mm": 5,
+    "lift_speed_mm_min": 80,
+    "retract_speed_mm_min": 210,
+    "rest_after_retract_s": 0.5
+  },
+  "manufacturer_ranges": {
+    "ceramic-grey": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "white": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "red": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "clear-green": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "clear-blue": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "yellow": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "beige": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "mint-clear-green": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "smoky-black": {"bottom_exposure_s": [25, 35], "normal_exposure_s": [2.5, 3.0]},
+    "black": {"bottom_exposure_s": [30, 35], "normal_exposure_s": [3.0, 3.5]}
+  },
+  "selection_rule": "Do not create a candidate-ready material profile until the actual bottle color is known. Use the manufacturer range only as a calibration seed, not as production authority."
+}
