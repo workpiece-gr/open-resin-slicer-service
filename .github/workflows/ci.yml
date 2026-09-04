@@ -5,6 +5,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: resin-slicer-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit:
     runs-on: ubuntu-24.04
@@ -74,7 +78,6 @@ jobs:
 
           bundle = Path('acceptance-bundle.zip').read_bytes()
           with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
-              names = zf.namelist()
               manifest = json.loads(zf.read('manifest.json'))
               assert manifest['authority'] == 'acceptance-candidate-only'
               assert manifest['provenance_chain'] == ['source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native']
@@ -102,7 +105,7 @@ jobs:
               support_points = [name for name in project_names if 'sla_support_points' in name.lower()]
               Path('acceptance-out/project-contents.txt').write_text('\n'.join(project_names) + '\n')
               Path('acceptance-out/support-point-state.txt').write_text(
-                  ('explicit support-point metadata: ' + ', '.join(support_points)) if support_points
+                  ('explicit support-point metadata: ' + ', '.join(support_points) + '\n') if support_points
                   else 'no explicit support-point metadata; automatic supports must regenerate from retained SLA settings on project load\n'
               )
               print('3MF entries:', len(project_names))
