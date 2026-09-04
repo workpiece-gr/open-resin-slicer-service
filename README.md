@@ -23,7 +23,7 @@ Machine facts currently encoded in the acceptance profile:
 
 The Mars 2 profile is **candidate-ready, not production-ready**. Physical CTB acceptance on Chris's real printer is required before promotion.
 
-The resin family is recorded under `profiles/reference/elegoo-water-washable-v1.json`, but no concrete material profile is enabled yet because ELEGOO's recommended exposure depends on **resin color**. The actual bottle color must be selected before creating the first candidate material profile.
+The first concrete material profile is `elegoo-water-washable-grey`, seeded from ELEGOO's Mars 2 / Mars 2 Pro Water Washable Ceramic Grey range at **0.05 mm**. It starts at **2.75 s normal exposure / 30 s initial exposure**, the midpoint of the published 2.5-3.0 s / 25-35 s ranges. This is an acceptance seed only, not production authority.
 
 ## Candidate vs production endpoints
 
