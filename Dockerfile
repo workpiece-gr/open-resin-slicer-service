@@ -25,7 +25,7 @@ RUN cmake .. \
     -DSLIC3R_PCH=OFF \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH=/src/PrusaSlicer/deps/build/destdir/usr/local \
-    && make -j"${BUILD_JOBS}" prusa-slicer
+    && make -j"${BUILD_JOBS}"
 
 FROM ubuntu:24.04
 ARG UVTOOLS_VERSION=6.2.0
