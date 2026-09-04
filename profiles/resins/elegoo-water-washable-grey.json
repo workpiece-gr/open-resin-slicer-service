@@ -1,0 +1,32 @@
+{
+  "id": "elegoo-water-washable-grey",
+  "label": "ELEGOO Water Washable Grey · Mars 2 · 0.05 mm (candidate)",
+  "manufacturer": "ELEGOO",
+  "family": "Water Washable Resin",
+  "color": "Grey / Ceramic Grey",
+  "candidate_ready": true,
+  "production_ready": false,
+  "calibration_status": "manufacturer-range-seeded; physical Mars-2 calibration pending",
+  "blocked_reason": "Requires a real Mars 2 calibration print and documented acceptance before production promotion.",
+  "color_required": false,
+  "layer_height_mm": 0.05,
+  "config": "resins/elegoo-water-washable-grey.ini",
+  "candidate_seed": {
+    "normal_exposure_s": 2.75,
+    "initial_exposure_s": 30
+  },
+  "manufacturer_range": {
+    "normal_exposure_s": [2.5, 3.0],
+    "initial_exposure_s": [25, 35]
+  },
+  "motion_contract": {
+    "lift_distance_mm": 5,
+    "lift_speed_mm_min": 80,
+    "retract_speed_mm_min": 210,
+    "rest_after_retract_s": 0.5
+  },
+  "source_basis": [
+    "ELEGOO Printers Resin Setting Sheet: Mars 2 / Mars 2 Pro Water Washable Resin Ceramic Grey",
+    "ELEGOO Mars 2 manual: 0.05 mm recommended layer height and mono-LCD exposure guidance"
+  ]
+}
