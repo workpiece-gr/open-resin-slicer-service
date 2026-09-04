@@ -22,7 +22,18 @@ def write_profile(root: Path, kind_dir: str, pid: str, candidate=True, productio
 
 
 def registry_fixture(tmp_path: Path, *, candidate_combos=None, production_combos=None, production=False):
-    write_profile(tmp_path, "printers", "printer-a", production=production, native_format="ctb")
+    write_profile(
+        tmp_path,
+        "printers",
+        "printer-a",
+        production=production,
+        native_format="ctb",
+        display_width_mm=82.62,
+        display_height_mm=130.56,
+        manufacturing_envelope_width_mm=80,
+        manufacturing_envelope_depth_mm=129,
+        manufacturing_envelope_coordinate_mapping="validated" if production else "unverified",
+    )
     write_profile(tmp_path, "resins", "resin-a", production=production)
     write_profile(tmp_path, "quality", "balanced", production=production)
     (tmp_path / "compatibility.json").write_text(json.dumps({
@@ -43,6 +54,8 @@ def test_candidate_registry_accepts_candidate_tuple_but_production_stays_blocked
     registry = registry_fixture(tmp_path, candidate_combos=combo)
     profiles = registry.resolve_candidate("printer-a", "resin-a", "balanced")
     assert [p.id for p in profiles] == ["printer-a", "resin-a", "balanced"]
+    envelope = registry.printer_manufacturing_envelope("printer-a")
+    assert (envelope.width_mm, envelope.depth_mm, envelope.coordinate_mapping) == (80.0, 129.0, "unverified")
     assert registry.candidate_ready is True
     assert registry.production_ready is False
     with pytest.raises(ProfileError, match="not validated for production"):
@@ -71,3 +84,52 @@ def test_registry_rejects_path_escape(tmp_path):
     (tmp_path / "compatibility.json").write_text('{"candidate_combinations": [], "production_combinations": []}', encoding="utf-8")
     with pytest.raises(ProfileError, match="escapes"):
         ProfileRegistry(tmp_path)
+
+
+def test_registry_rejects_manufacturing_envelope_larger_than_display(tmp_path):
+    write_profile(
+        tmp_path,
+        "printers",
+        "printer-a",
+        display_width_mm=82.62,
+        display_height_mm=130.56,
+        manufacturing_envelope_width_mm=83,
+        manufacturing_envelope_depth_mm=129,
+        manufacturing_envelope_coordinate_mapping="unverified",
+    )
+    (tmp_path / "compatibility.json").write_text('{"candidate_combinations": [], "production_combinations": []}', encoding="utf-8")
+    with pytest.raises(ProfileError, match="width exceeds display width"):
+        ProfileRegistry(tmp_path)
+
+
+def test_production_printer_requires_validated_coordinate_mapping(tmp_path):
+    write_profile(
+        tmp_path,
+        "printers",
+        "printer-a",
+        production=True,
+        display_width_mm=82.62,
+        display_height_mm=130.56,
+        manufacturing_envelope_width_mm=80,
+        manufacturing_envelope_depth_mm=129,
+        manufacturing_envelope_coordinate_mapping="unverified",
+    )
+    (tmp_path / "compatibility.json").write_text('{"candidate_combinations": [], "production_combinations": []}', encoding="utf-8")
+    with pytest.raises(ProfileError, match="requires physically validated"):
+        ProfileRegistry(tmp_path)
+
+
+def test_mars2_profile_separates_display_and_manufacturing_envelope():
+    root = Path(__file__).resolve().parents[1] / "profiles"
+    registry = ProfileRegistry(root)
+    mars = registry.get("printer", "elegoo-mars-2")
+    envelope = registry.printer_manufacturing_envelope("elegoo-mars-2")
+    assert mars.metadata["display_width_mm"] == 82.62
+    assert mars.metadata["display_height_mm"] == 130.56
+    assert (envelope.width_mm, envelope.depth_mm) == (80.0, 129.0)
+    assert envelope.coordinate_mapping == "unverified"
+    with pytest.raises(ProfileError, match="not physically validated"):
+        registry.printer_manufacturing_envelope(
+            "elegoo-mars-2",
+            require_coordinate_mapping=True,
+        )

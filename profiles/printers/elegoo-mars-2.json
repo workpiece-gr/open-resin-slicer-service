@@ -14,6 +14,10 @@
   "display_pixels_y": 2560,
   "display_width_mm": 82.62,
   "display_height_mm": 130.56,
+  "manufacturing_envelope_width_mm": 80,
+  "manufacturing_envelope_depth_mm": 129,
+  "manufacturing_envelope_coordinate_mapping": "unverified",
+  "manufacturing_envelope_status": "conservative-advertised-build-volume; display-coordinate-offset-physical-validation-pending",
   "max_print_height_mm": 150,
   "wavelength_nm": 405,
   "sources": {
