@@ -3,7 +3,9 @@
 # Prusa recommends building against its pinned dependency bundle for supported Linux source builds.
 FROM ubuntu:24.04 AS prusa-builder
 ARG PRUSA_SLICER_COMMIT=b028299c770b8380ee81c921a2867d522f288123
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential autoconf cmake libglu1-mesa-dev libgtk-3-dev \
     libdbus-1-dev libwebkit2gtk-4.1-dev libncurses-dev texinfo ca-certificates \
