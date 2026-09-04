@@ -4,7 +4,7 @@ Status: CP3 supporting checkpoint. This is cheap candidate-screening geometry on
 
 ## Purpose
 
-Running the full pinned PrusaSlicer support/pad/slice chain for every orientation proposal would be expensive. `app/orientation_proxy.py` therefore extracts bounded geometric signals that can later be used to prune the deterministic proposal set before a small number of finalists receive real Prusa/UVtools validation.
+Running the full pinned PrusaSlicer support/pad/slice chain for every orientation proposal would be expensive. `app/orientation_proxy.py` therefore extracts bounded geometric signals that can be used to prune the deterministic proposal set before a small number of finalists receive real Prusa/UVtools validation.
 
 ## STL boundary
 
@@ -41,10 +41,26 @@ The proxy intentionally sums absolute areas of every closed contour. Nested hole
 
 The existing browser resin estimate uses a generic downward-face ratio and support fraction; that is useful for customer preview but is intentionally not copied into server manufacturing authority.
 
+## Deterministic proxy screening
+
+`app/orientation_screen.py` reduces the bounded proposal set to at most five finalists by default, with a hard cap of eight.
+
+It first blocks proxy candidates whose sampled intersections contain open contours. Among the remaining candidates it performs non-dominated/Pareto ranking while minimizing three proxy objectives:
+
+- maximum sampled gross layer area;
+- downward support-moment signal;
+- Z height.
+
+This stage deliberately has **no calibrated weights**. Within the same Pareto rank, candidates are ordered by their lowest normalized maximum regret across the three objectives, then normalized total burden, least total rotation, and canonical XYZ angles. This creates a deterministic balanced tie-break without converting proxy signals into fake production metrics.
+
+The proxy-screen manifest is `workpiece-resin-orientation-proxy-screen-v1` and hard-codes `automatic_production_authority` to false.
+
 ## Slice boundary
 
 This module does not detect authoritative islands, suction cups, resin traps, supports, pad geometry, or UVtools issues. Those remain hard-blocking sliced-validation evidence after finalists are materialized through the real pinned toolchain.
 
+Proxy finalists are **only** candidates for expensive validation. They may not enter deterministic physical-plate planning as the selected production orientation until actual sliced-validation metrics have been generated and the final orientation decision passes with `require_sliced_validation=True`.
+
 ## Next step
 
-Add a deterministic proxy-screening/ranking layer that uses these signals only to choose a small finalist set. The final orientation decision must still run with `require_sliced_validation=True` before it can feed the deterministic physical-plate planner.
+Once CP1 container acceptance is stable, add a finalist-validation path that materializes the small proxy-selected set with the real Prusa support/pad configuration, retains each review 3MF, and derives sliced/UVtools evidence before final orientation selection.
