@@ -3,6 +3,7 @@ name: Resin Slicer CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   unit:
@@ -15,5 +16,119 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
 
-  # Intentionally not enabled until the first dedicated container acceptance pass.
-  # PrusaSlicer builds its dependency bundle from source and requires substantial RAM/time.
+  container-acceptance:
+    # Avoid doing the expensive PrusaSlicer source build twice for PR branches.
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build pinned resin slicer image
+        run: docker build --progress=plain -t workpiece-resin-slicer:acceptance .
+
+      - name: Start acceptance service
+        run: |
+          docker run -d --name workpiece-resin-acceptance \
+            -p 18080:8080 \
+            -e WORKPIECE_RESIN_PROJECT_API_TOKEN=acceptance-token \
+            workpiece-resin-slicer:acceptance
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/health > health.json; then
+              cat health.json
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs workpiece-resin-acceptance
+          exit 1
+
+      - name: Generate deterministic acceptance STL
+        run: python3 scripts/make_acceptance_stl.py
+
+      - name: Generate Mars 2 grey review bundle
+        run: |
+          curl --fail-with-body \
+            -H 'Authorization: Bearer acceptance-token' \
+            -F 'file=@acceptance-cube.stl;type=model/stl' \
+            -F 'printer_profile=elegoo-mars-2' \
+            -F 'resin_profile=elegoo-water-washable-grey' \
+            -F 'quality=balanced-0p05-medium' \
+            -F 'rotate_x=15' \
+            -F 'rotate_y=0' \
+            -F 'rotate_z=25' \
+            -D acceptance-headers.txt \
+            -o acceptance-bundle.zip \
+            http://127.0.0.1:18080/v1/candidate
+          cat acceptance-headers.txt
+          unzip -l acceptance-bundle.zip
+
+      - name: Verify bundle provenance and project structure
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import io
+          import json
+          import zipfile
+          from pathlib import Path
+
+          bundle = Path('acceptance-bundle.zip').read_bytes()
+          with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
+              names = zf.namelist()
+              manifest = json.loads(zf.read('manifest.json'))
+              assert manifest['authority'] == 'acceptance-candidate-only'
+              assert manifest['provenance_chain'] == ['source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native']
+              files = manifest['files']
+              for key in ('source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native'):
+                  name = files[key]['name']
+                  payload = zf.read(name)
+                  assert payload, f'{key} is empty'
+                  assert hashlib.sha256(payload).hexdigest() == files[key]['sha256']
+              assert files['review_3mf']['name'].endswith('.3mf')
+              assert files['printer_native']['name'].endswith('.ctb')
+              project = zf.read(files['review_3mf']['name'])
+              native_name = files['printer_native']['name']
+              Path('acceptance-out').mkdir(exist_ok=True)
+              Path('acceptance-out/review.3mf').write_bytes(project)
+              Path('acceptance-out/print.ctb').write_bytes(zf.read(native_name))
+              Path('acceptance-out/manifest.json').write_bytes(zf.read('manifest.json'))
+              Path('acceptance-out/uvtools-issues.txt').write_bytes(zf.read('uvtools-issues.txt'))
+
+          with zipfile.ZipFile(io.BytesIO(project)) as project_zip:
+              project_names = project_zip.namelist()
+              assert '[Content_Types].xml' in project_names
+              assert any(name.lower().endswith('.model') for name in project_names)
+              assert any('config' in name.lower() for name in project_names), project_names
+              support_points = [name for name in project_names if 'sla_support_points' in name.lower()]
+              Path('acceptance-out/project-contents.txt').write_text('\n'.join(project_names) + '\n')
+              Path('acceptance-out/support-point-state.txt').write_text(
+                  ('explicit support-point metadata: ' + ', '.join(support_points)) if support_points
+                  else 'no explicit support-point metadata; automatic supports must regenerate from retained SLA settings on project load\n'
+              )
+              print('3MF entries:', len(project_names))
+              print('Explicit SLA support-point metadata:', bool(support_points))
+          PY
+
+      - name: Inspect generated CTB with the pinned UVtools
+        run: |
+          docker run --rm \
+            -v "$PWD/acceptance-out:/work:rw" \
+            --entrypoint /opt/uvtools/UVtoolsCmd \
+            workpiece-resin-slicer:acceptance \
+            print-properties /work/print.ctb > acceptance-out/ctb-properties.txt
+          cat acceptance-out/ctb-properties.txt
+
+      - name: Upload real acceptance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mars2-grey-cp1-acceptance
+          path: |
+            acceptance-bundle.zip
+            acceptance-headers.txt
+            health.json
+            acceptance-out/
+          if-no-files-found: error
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs workpiece-resin-acceptance || true
