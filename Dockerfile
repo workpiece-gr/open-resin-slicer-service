@@ -3,6 +3,7 @@
 # Prusa recommends building against its pinned dependency bundle for supported Linux source builds.
 FROM ubuntu:24.04 AS prusa-builder
 ARG PRUSA_SLICER_COMMIT=b028299c770b8380ee81c921a2867d522f288123
+ARG BUILD_JOBS=4
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
@@ -15,7 +16,7 @@ RUN git clone https://github.com/prusa3d/PrusaSlicer.git /src/PrusaSlicer \
     && git checkout "${PRUSA_SLICER_COMMIT}" \
     && sed -i 's#https://gmplib.org/download/gmp/gmp-6.2.1.tar.bz2#https://ftp.gnu.org/gnu/gmp/gmp-6.2.1.tar.bz2#' deps/+GMP/GMP.cmake
 WORKDIR /src/PrusaSlicer/deps/build
-RUN cmake .. -DDEP_WX_GTK3=ON && make -j2
+RUN cmake .. -DDEP_WX_GTK3=ON && make -j"${BUILD_JOBS}"
 WORKDIR /src/PrusaSlicer/build
 RUN cmake .. \
     -DSLIC3R_STATIC=1 \
@@ -24,7 +25,7 @@ RUN cmake .. \
     -DSLIC3R_PCH=OFF \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_PREFIX_PATH=/src/PrusaSlicer/deps/build/destdir/usr/local \
-    && make -j2 prusa-slicer
+    && make -j"${BUILD_JOBS}" prusa-slicer
 
 FROM ubuntu:24.04
 ARG UVTOOLS_VERSION=6.2.0

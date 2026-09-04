@@ -24,12 +24,23 @@ jobs:
     # Avoid doing the expensive PrusaSlicer source build twice for PR branches.
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build pinned resin slicer image
-        run: docker build --progress=plain -t workpiece-resin-slicer:acceptance .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: workpiece-resin-slicer:acceptance
+          # Cache every intermediate Prusa/dependency layer so normal service/profile
+          # changes do not rebuild the pinned C++ toolchain from scratch.
+          cache-from: type=gha,scope=resin-slicer-prusa-2.9.6
+          cache-to: type=gha,mode=max,scope=resin-slicer-prusa-2.9.6
 
       - name: Start acceptance service
         run: |
