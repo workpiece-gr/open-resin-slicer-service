@@ -12,7 +12,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN git clone https://github.com/prusa3d/PrusaSlicer.git /src/PrusaSlicer \
     && cd /src/PrusaSlicer \
-    && git checkout "${PRUSA_SLICER_COMMIT}"
+    && git checkout "${PRUSA_SLICER_COMMIT}" \
+    && sed -i 's#https://gmplib.org/download/gmp/gmp-6.2.1.tar.bz2#https://ftp.gnu.org/gnu/gmp/gmp-6.2.1.tar.bz2#' deps/+GMP/GMP.cmake
 WORKDIR /src/PrusaSlicer/deps/build
 RUN cmake .. -DDEP_WX_GTK3=ON && make -j2
 WORKDIR /src/PrusaSlicer/build
