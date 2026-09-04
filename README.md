@@ -2,15 +2,35 @@
 
 Open-source HTTP service for Workpiece MSLA/resin slicing. It is intentionally isolated from the production FDM OrcaSlicer service.
 
-## Engine chain
+## Artifact chain
 
-`immutable STL -> pinned PrusaSlicer SLA slice (.sl1) -> pinned UVtools conversion/inspection -> printer-native .ctb/.goo -> hashes/provenance -> human review`
+`immutable STL -> PrusaSlicer review project (.3mf) -> PrusaSlicer SLA slice (.sl1) -> UVtools conversion/inspection -> printer-native .ctb/.goo`
 
-The service never sends a job to a printer. Browser previews and orientation choices remain proposals until a retained native artifact has passed Workpiece review and physical acceptance.
+The **review 3MF is created first** with the selected machine, resin, quality/support settings and orientation. The SLA slice is then generated from that exact retained 3MF without reloading profiles or reapplying transforms. The 3MF SHA-256 therefore sits directly in the provenance chain that produced the final printer file.
+
+The API returns a review ZIP containing:
+
+- immutable source STL;
+- PrusaSlicer review `.3mf`;
+- intermediate `.sl1`;
+- exact printer-native `.ctb`/`.goo`;
+- `manifest.json` with hashes, engines, profiles and orientation;
+- raw UVtools issue report.
+
+The intended workshop flow mirrors Workpiece FDM authority as closely as resin formats allow:
+
+1. open the retained 3MF in PrusaSlicer and inspect plate placement, orientation, SLA settings and supports;
+2. if the project is accepted **without editing it**, the bundled CTB is the exact printer file derived from that project;
+3. if the 3MF is changed, the old CTB is invalid for that review state and the bundle must be regenerated;
+4. only a physically accepted printer/resin/quality tuple may become production-authoritative.
+
+PrusaSlicer project 3MF can persist SLA support-point metadata, but automatic support generation through the CLI may instead retain the support parameters and regenerate automatic supports on project load. CP1 explicitly records which behavior the pinned build produces; physical desktop inspection remains an acceptance gate.
+
+The service never sends a job to a printer automatically.
 
 ## Current acceptance target
 
-The first machine target is **ELEGOO Mars 2** with **ELEGOO Water Washable Resin**.
+The first machine target is **ELEGOO Mars 2** with **ELEGOO Water Washable Grey Resin**.
 
 Machine facts currently encoded in the acceptance profile:
 
@@ -23,12 +43,12 @@ Machine facts currently encoded in the acceptance profile:
 
 The Mars 2 profile is **candidate-ready, not production-ready**. Physical CTB acceptance on Chris's real printer is required before promotion.
 
-The first concrete material profile is `elegoo-water-washable-grey`, seeded from ELEGOO's Mars 2 / Mars 2 Pro Water Washable Ceramic Grey range at **0.05 mm**. It starts at **2.75 s normal exposure / 30 s initial exposure**, the midpoint of the published 2.5-3.0 s / 25-35 s ranges. This is an acceptance seed only, not production authority.
+The first concrete resin profile is `elegoo-water-washable-grey`. At 0.05 mm it starts at **2.75 s normal exposure / 30 s initial exposure**, the midpoint of ELEGOO's published Mars 2 / Mars 2 Pro Ceramic Grey range. Those values are calibration seeds only, not production authority.
 
 ## Candidate vs production endpoints
 
-- `POST /v1/candidate` accepts only explicitly approved **candidate combinations**. It may return a CTB even when UVtools reports issues so the file can be inspected during controlled acceptance. The response is marked `X-Workpiece-Authority: acceptance-candidate-only`.
-- `POST /v1/project` accepts only separately approved **production combinations** and can fail closed on critical UVtools issues.
+- `POST /v1/candidate` accepts only explicitly approved **candidate combinations**. It returns an acceptance bundle and may retain UVtools issues for controlled inspection. The response is marked `X-Workpiece-Authority: acceptance-candidate-only`.
+- `POST /v1/project` accepts only separately approved **production combinations** and fails closed on configured critical UVtools issues. When eventually enabled, its response is marked `production-authoritative`.
 
 This lets Workpiece test real hardware without pretending calibration is complete.
 
@@ -42,8 +62,8 @@ This lets Workpiece test real hardware without pretending calibration is complet
 - `GET /health`
 - `GET /source`
 - `GET /v1/profiles`
-- `POST /v1/candidate` — authenticated acceptance-only slice
-- `POST /v1/project` — authenticated production-authority slice; unavailable until profiles are physically validated
+- `POST /v1/candidate` — authenticated acceptance-only bundle
+- `POST /v1/project` — authenticated production-authority bundle; unavailable until profiles are physically validated
 
 Both POST endpoints require `WORKPIECE_RESIN_PROJECT_API_TOKEN`.
 
@@ -67,7 +87,7 @@ There is no generic Elegoo fallback.
 python -m pytest -q
 ```
 
-Unit tests mock the external slicers. A real container slice and physical-printer acceptance are separate checkpoints.
+Unit tests mock the external slicers. The PR CI also has a dedicated container-acceptance job that builds the pinned engines and requests a real Mars 2 grey bundle through the HTTP API.
 
 ## Planned Mars 2 acceptance
 
