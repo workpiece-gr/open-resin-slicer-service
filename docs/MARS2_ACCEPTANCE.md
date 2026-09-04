@@ -18,14 +18,12 @@ The display/CTB/motion seed is derived from UVtools' Mars 2 Pro profile because 
 
 ELEGOO Water Washable Resin at 0.05 mm. ELEGOO's published settings vary by color. Typical non-black colors are approximately 2.5-3.0 s normal exposure with 25-35 s bottom exposure; black is approximately 3.0-3.5 s normal and 30-35 s bottom. These are calibration ranges, not Workpiece production authority.
 
-**Blocked input:** actual bottle color.
-
-After the color is known, create a concrete candidate resin INI using the middle of the applicable manufacturer range as the *starting calibration seed*. Do not mark it production-ready.
+The first selected color is **Grey / Ceramic Grey**. The candidate profile `elegoo-water-washable-grey` uses the midpoint of ELEGOO's published Mars 2 / Mars 2 Pro range as its starting seed: **2.75 s normal exposure and 30 s initial exposure at 0.05 mm**. It is candidate-ready only and must be calibrated on the physical printer before production promotion.
 
 ## CP1 acceptance sequence
 
 1. Build the pinned Docker image and verify `/health` reports both engines.
-2. Add exact color material profile and one candidate tuple for `elegoo-mars-2 + resin-color + balanced-0p05-medium`.
+2. Use the candidate tuple `elegoo-mars-2 + elegoo-water-washable-grey + balanced-0p05-medium`; keep production disabled.
 3. Slice a small benign calibration STL through `/v1/candidate`.
 4. Verify source, SL1 and CTB SHA-256 provenance.
 5. Open the CTB in UVtools desktop and verify resolution, physical dimensions, mirror/orientation, layer height, exposure, bottom exposure, lift/retract values and issue report.
@@ -38,7 +36,7 @@ After the color is known, create a concrete candidate resin INI using the middle
 
 ## Fail-closed rules
 
-- No guessed resin color.
+- No substitution of grey settings for another resin color without its own candidate profile.
 - No generic resin production profile.
 - No Mars 2 Pro 160 mm Z assumption.
 - No production endpoint before physical acceptance.
