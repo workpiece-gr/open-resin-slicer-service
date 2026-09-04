@@ -1,4 +1,6 @@
 {
-  "candidate_combinations": [],
+  "candidate_combinations": [
+    ["elegoo-mars-2", "elegoo-water-washable-grey", "balanced-0p05-medium"]
+  ],
   "production_combinations": []
 }
