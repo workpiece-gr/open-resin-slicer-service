@@ -176,9 +176,14 @@ def test_multi_plate_orchestration_sequences_complete_authority_chain(monkeypatc
     def build_order(**kwargs):
         captured.update(kwargs)
         assert kwargs["authority"] == "production-authoritative"
+        assert kwargs["execution_environment"] == {
+            "toolchain_image_ref": VALID_TOOLCHAIN,
+            "immutable": True,
+        }
         return {
             "schema": "workpiece-resin-order-manifest-v4",
             "authority": kwargs["authority"],
+            "execution_environment": dict(kwargs["execution_environment"]),
             "plates": [{"plate_index": record.plate_index} for record in kwargs["plate_artifacts"]],
         }
 
@@ -215,6 +220,10 @@ def test_multi_plate_orchestration_sequences_complete_authority_chain(monkeypatc
     assert captured["printer_profile"] == "printer-a"
     assert captured["resin_profile"] == "resin-a"
     assert captured["quality_profile"] == "quality-a"
+    assert captured["execution_environment"] == {
+        "toolchain_image_ref": VALID_TOOLCHAIN,
+        "immutable": True,
+    }
     records = captured["plate_artifacts"]
     assert [record.project_filename for record in records] == [
         "part-plate-001-materialized.3mf",
