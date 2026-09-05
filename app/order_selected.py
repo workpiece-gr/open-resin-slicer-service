@@ -13,10 +13,15 @@ from .orientation_plate import (
     SelectedOrientationPlatePlan,
     orientation_plate_plan_manifest,
 )
+from .plate_authority import (
+    SelectedPlateAuthorityEvidence,
+    selected_plate_authority_manifest,
+)
 
 
-SELECTED_ORDER_SCHEMA = "workpiece-resin-order-manifest-v3"
+SELECTED_ORDER_SCHEMA = "workpiece-resin-order-manifest-v4"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_PRODUCTION_AUTHORITY = "production-authoritative"
 
 
 class SelectedOrientationOrderError(ValueError):
@@ -32,6 +37,17 @@ def _sha256(name: str, value: str) -> str:
     return normalized
 
 
+def _issues(value: Mapping[str, int]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for key, count in sorted(value.items()):
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise SelectedOrientationOrderError(
+                "Selected plate issue counts must be non-negative integers."
+            )
+        result[str(key)] = count
+    return result
+
+
 @dataclass(frozen=True)
 class SelectedPlateArtifactRecord:
     plate_index: int
@@ -42,6 +58,7 @@ class SelectedPlateArtifactRecord:
     native_sha256: str
     issue_summary: Mapping[str, int]
     materialization: SelectedMaterializedPlateEvidence
+    authority_evidence: SelectedPlateAuthorityEvidence | None = None
 
 
 def _validate_selected_materialization(
@@ -109,6 +126,119 @@ def _validate_selected_materialization(
     )
 
 
+def _validate_plate_authority_binding(
+    selected_plan: SelectedOrientationPlatePlan,
+    record: SelectedPlateArtifactRecord,
+) -> SelectedPlateAuthorityEvidence:
+    authority = record.authority_evidence
+    if authority is None:
+        raise SelectedOrientationOrderError(
+            "Production-authoritative selected orders require complete plate authority evidence for every physical plate."
+        )
+    if authority.plate_index != record.plate_index:
+        raise SelectedOrientationOrderError(
+            "Plate authority evidence plate_index does not match its artifact record."
+        )
+    if authority.printer_profile_id != selected_plan.printer_plate_plan.printer_profile_id:
+        raise SelectedOrientationOrderError(
+            "Plate authority evidence printer profile does not match the selected plate plan."
+        )
+
+    expected_selected_chain = (
+        _sha256("selected plan source_sha256", selected_plan.source_sha256),
+        _sha256("selected plan review 3MF", selected_plan.review_project_sha256),
+        _sha256("selected plan effective config", selected_plan.effective_config_sha256),
+        _sha256("selected plan intermediate SL1", selected_plan.intermediate_sha256),
+        _sha256("selected plan printer-native file", selected_plan.native_sha256),
+    )
+    authority_selected_chain = (
+        _sha256("authority source_sha256", authority.source_sha256),
+        _sha256("authority selected review 3MF", authority.selected_review_3mf_sha256),
+        _sha256(
+            "authority selected effective config",
+            authority.selected_effective_config_sha256,
+        ),
+        _sha256(
+            "authority selected intermediate SL1",
+            authority.selected_intermediate_sl1_sha256,
+        ),
+        _sha256(
+            "authority selected printer-native file",
+            authority.selected_printer_native_sha256,
+        ),
+    )
+    if authority_selected_chain != expected_selected_chain:
+        raise SelectedOrientationOrderError(
+            "Plate authority evidence does not derive from the exact selected sliced artifact chain."
+        )
+
+    if authority.instance_evidence.materialized_plate != record.materialization:
+        raise SelectedOrientationOrderError(
+            "Plate authority instance evidence does not match the exact selected materialization record."
+        )
+    project_hash = _sha256("record materialized project", record.materialization.project_sha256)
+    if _sha256("authority materialized project", authority.materialized_project_sha256) != project_hash:
+        raise SelectedOrientationOrderError(
+            "Plate authority evidence is not bound to the exact retained materialized review 3MF."
+        )
+
+    intermediate_hash = _sha256("record plate intermediate SL1", record.intermediate_sha256)
+    native_hash = _sha256("record plate printer-native file", record.native_sha256)
+    if _sha256("authority plate intermediate SL1", authority.plate_intermediate_sha256) != intermediate_hash:
+        raise SelectedOrientationOrderError(
+            "Plate artifact intermediate SL1 hash does not match its production authority evidence."
+        )
+    if _sha256("authority plate printer-native file", authority.plate_printer_native_sha256) != native_hash:
+        raise SelectedOrientationOrderError(
+            "Plate artifact printer-native hash does not match its production authority evidence."
+        )
+
+    record_issues = _issues(record.issue_summary)
+    authority_issues = _issues(authority.issue_summary)
+    if record_issues != authority_issues:
+        raise SelectedOrientationOrderError(
+            "Plate artifact issue summary does not match its production authority evidence."
+        )
+
+    execution = authority.native_execution
+    if execution.plate_index != record.plate_index:
+        raise SelectedOrientationOrderError(
+            "Plate authority native execution index does not match its artifact record."
+        )
+    if _sha256("authority execution materialized project", execution.materialized_project_sha256) != project_hash:
+        raise SelectedOrientationOrderError(
+            "Plate authority native execution is not bound to the exact retained materialized review 3MF."
+        )
+    artifact = execution.artifact
+    if _sha256("authority native artifact intermediate", artifact.intermediate_sha256) != intermediate_hash:
+        raise SelectedOrientationOrderError(
+            "Plate authority native execution intermediate hash differs from the retained order file."
+        )
+    if _sha256("authority native artifact", artifact.native_sha256) != native_hash:
+        raise SelectedOrientationOrderError(
+            "Plate authority native execution hash differs from the retained order printer-native file."
+        )
+    if _issues(artifact.issue_summary) != record_issues:
+        raise SelectedOrientationOrderError(
+            "Plate authority native execution issue receipt differs from the retained order issue summary."
+        )
+
+    whole_plate = authority.whole_plate_native_evidence
+    if whole_plate.plate_index != record.plate_index:
+        raise SelectedOrientationOrderError(
+            "Whole-plate native authority evidence index does not match its artifact record."
+        )
+    if _sha256("whole-plate materialized project", whole_plate.materialized_project_sha256) != project_hash:
+        raise SelectedOrientationOrderError(
+            "Whole-plate native authority evidence is not bound to the exact materialized review 3MF."
+        )
+    if _sha256("whole-plate printer-native file", whole_plate.printer_native_sha256) != native_hash:
+        raise SelectedOrientationOrderError(
+            "Whole-plate native authority evidence is not bound to the exact retained printer-native file."
+        )
+    return authority
+
+
 def build_selected_orientation_order_manifest(
     *,
     source_filename: str,
@@ -124,7 +254,14 @@ def build_selected_orientation_order_manifest(
     uvtools_version: str,
     authority: str,
 ) -> dict:
-    """Build an order whose source, orientation and physical plates share one provenance chain."""
+    """Build an order whose source, selected winner and physical plates share one exact chain.
+
+    Acceptance-candidate orders retain the earlier selected-materialization contract and do
+    not require a production authority object. A production-authoritative order requires
+    one complete, already-validated ``SelectedPlateAuthorityEvidence`` for every physical
+    plate and binds the retained order filenames/hashes/issues back to that exact evidence.
+    This function records authority only; it does not enable a printer or production route.
+    """
     source_hash = _sha256("source_sha256", source_sha256)
     selected_source_hash = _sha256(
         "selected_orientation_plan.source_sha256",
@@ -144,6 +281,27 @@ def build_selected_orientation_order_manifest(
         _validate_selected_materialization(selected_orientation_plan, record)
         for record in plate_artifacts
     )
+    authority_value = str(authority).strip()
+    authority_by_plate: dict[int, SelectedPlateAuthorityEvidence] = {}
+    if authority_value == _PRODUCTION_AUTHORITY:
+        for record in plate_artifacts:
+            plate_authority = _validate_plate_authority_binding(
+                selected_orientation_plan,
+                record,
+            )
+            if record.plate_index in authority_by_plate:
+                raise SelectedOrientationOrderError(
+                    f"Duplicate production authority evidence for plate {record.plate_index}."
+                )
+            authority_by_plate[record.plate_index] = plate_authority
+    else:
+        for record in plate_artifacts:
+            if record.authority_evidence is not None:
+                authority_by_plate[record.plate_index] = _validate_plate_authority_binding(
+                    selected_orientation_plan,
+                    record,
+                )
+
     manifest = build_order_manifest(
         source_filename=source_filename,
         source_sha256=source_hash,
@@ -172,7 +330,20 @@ def build_selected_orientation_order_manifest(
         item["selected_materialization"] = selected_materialized_plate_manifest(
             selected_by_plate[plate_index]
         )
+        if plate_index in authority_by_plate:
+            item["plate_authority"] = selected_plate_authority_manifest(
+                authority_by_plate[plate_index]
+            )
+        else:
+            item["plate_authority"] = None
         plates.append(item)
+
+    if authority_value == _PRODUCTION_AUTHORITY:
+        manifest_indices = {item.get("plate_index") for item in plates}
+        if set(authority_by_plate) != manifest_indices:
+            raise SelectedOrientationOrderError(
+                "Production-authoritative selected order does not contain complete plate authority evidence for every physical plate."
+            )
 
     result = dict(manifest)
     result["schema"] = SELECTED_ORDER_SCHEMA
@@ -180,8 +351,9 @@ def build_selected_orientation_order_manifest(
     result["selected_orientation_plan"] = orientation_plate_plan_manifest(
         selected_orientation_plan
     )
+    result["production_enablement_performed"] = False
     result["review_rule"] = (
         str(manifest.get("review_rule", "")).rstrip()
-        + " The order source, orientation, effective config, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate."
+        + " The order source, orientation, effective config, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate. Production-authoritative selected orders additionally require one complete plate-authority proof per physical plate, bound to the exact retained 3MF/SL1/native hashes and issue receipt. Recording this manifest does not enable production."
     ).strip()
     return result
