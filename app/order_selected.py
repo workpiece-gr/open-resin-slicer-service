@@ -17,6 +17,7 @@ from .plate_authority import (
     SelectedPlateAuthorityEvidence,
     selected_plate_authority_manifest,
 )
+from .toolchain import ToolchainProvenanceError, validate_toolchain_record
 
 
 SELECTED_ORDER_SCHEMA = "workpiece-resin-order-manifest-v4"
@@ -253,14 +254,16 @@ def build_selected_orientation_order_manifest(
     prusaslicer_commit: str,
     uvtools_version: str,
     authority: str,
+    execution_environment: Mapping[str, object] | None = None,
 ) -> dict:
     """Build an order whose source, selected winner and physical plates share one exact chain.
 
     Acceptance-candidate orders retain the earlier selected-materialization contract and do
-    not require a production authority object. A production-authoritative order requires
-    one complete, already-validated ``SelectedPlateAuthorityEvidence`` for every physical
-    plate and binds the retained order filenames/hashes/issues back to that exact evidence.
-    This function records authority only; it does not enable a printer or production route.
+    not require a production authority object or execution-environment record. A
+    production-authoritative order requires one complete, already-validated
+    ``SelectedPlateAuthorityEvidence`` for every physical plate plus an immutable
+    digest-pinned toolchain record. This function records authority only; it does not
+    enable a printer or production route.
     """
     source_hash = _sha256("source_sha256", source_sha256)
     selected_source_hash = _sha256(
@@ -301,6 +304,16 @@ def build_selected_orientation_order_manifest(
                     selected_orientation_plan,
                     record,
                 )
+
+    normalized_execution_environment: dict[str, object] | None = None
+    if execution_environment is not None or authority_value == _PRODUCTION_AUTHORITY:
+        try:
+            normalized_execution_environment = validate_toolchain_record(
+                execution_environment,
+                required=authority_value == _PRODUCTION_AUTHORITY,
+            )
+        except ToolchainProvenanceError as exc:
+            raise SelectedOrientationOrderError(str(exc)) from exc
 
     manifest = build_order_manifest(
         source_filename=source_filename,
@@ -351,9 +364,11 @@ def build_selected_orientation_order_manifest(
     result["selected_orientation_plan"] = orientation_plate_plan_manifest(
         selected_orientation_plan
     )
+    if normalized_execution_environment is not None:
+        result["execution_environment"] = normalized_execution_environment
     result["production_enablement_performed"] = False
     result["review_rule"] = (
         str(manifest.get("review_rule", "")).rstrip()
-        + " The order source, orientation, effective config, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate. Production-authoritative selected orders additionally require one complete plate-authority proof per physical plate, bound to the exact retained 3MF/SL1/native hashes and issue receipt. Recording this manifest does not enable production."
+        + " The order source, orientation, effective config, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate. Production-authoritative selected orders additionally require one complete plate-authority proof per physical plate, bound to the exact retained 3MF/SL1/native hashes and issue receipt, plus an immutable digest-pinned runtime toolchain receipt. Recording this manifest does not enable production."
     ).strip()
     return result
