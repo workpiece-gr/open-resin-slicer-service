@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from .coordinate_mapping import CoordinateMappingError
+from .coordinate_mapping import CoordinateMappingError, ManufacturingDisplayTransform
 from .native_envelope import NativeEnvelopeError, NativeEnvelopeEvidence
 from .orientation_sliced import SlicedOrientationValidation
 from .placement import Envelope2D
@@ -45,6 +45,7 @@ class SelectedOrientationPlatePlan:
     printer_plate_plan: PrinterPlatePlan
     pretranslation_coordinate_space: str = "legacy-unverified"
     native_display_envelope: Envelope2D | None = None
+    manufacturing_to_display_transform: ManufacturingDisplayTransform | None = None
 
 
 def plan_selected_sliced_orientation(
@@ -63,8 +64,10 @@ def plan_selected_sliced_orientation(
     The CTB rectangle is always retained verbatim in display coordinates. If the printer
     profile has a physically validated manufacturing-to-display transform, its four
     rectangle corners are mapped back into manufacturing coordinates and their
-    axis-aligned bounds drive packing. Otherwise only display-space width/depth may be
-    used for acceptance-candidate planning and automatic materialization remains blocked.
+    axis-aligned bounds drive packing. The exact transform used for that conversion is
+    retained in the selected plan so later materialization cannot silently use a changed
+    profile mapping. Otherwise only display-space width/depth may be used for
+    acceptance-candidate planning and automatic materialization remains blocked.
     """
     selected = sliced_validation.selected_evidence
     if selected is None:
@@ -102,11 +105,12 @@ def plan_selected_sliced_orientation(
     native_display_envelope = native_envelope.envelope
     packing_envelope = native_display_envelope
     packing_coordinate_space = native_envelope.coordinate_space
+    bound_transform: ManufacturingDisplayTransform | None = None
     try:
         printer_envelope = registry.printer_manufacturing_envelope(printer_profile_id)
         if printer_envelope.coordinate_mapping == "validated":
-            transform = registry.printer_manufacturing_display_transform(printer_profile_id)
-            bounds = transform.display_bounds_to_manufacturing_bounds(
+            bound_transform = registry.printer_manufacturing_display_transform(printer_profile_id)
+            bounds = bound_transform.display_bounds_to_manufacturing_bounds(
                 min_display_x_mm=native_display_envelope.min_x_mm,
                 max_display_x_mm=native_display_envelope.max_x_mm,
                 min_display_y_mm=native_display_envelope.min_y_mm,
@@ -149,6 +153,7 @@ def plan_selected_sliced_orientation(
         printer_plate_plan=profile_plan,
         pretranslation_coordinate_space=packing_coordinate_space,
         native_display_envelope=native_display_envelope,
+        manufacturing_to_display_transform=bound_transform,
     )
 
 
@@ -157,6 +162,7 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
     plate_manifest = printer_plate_plan_manifest(result.printer_plate_plan)
     coordinate_ready = (
         result.pretranslation_coordinate_space == MANUFACTURING_ENVELOPE_COORDINATE_SPACE
+        and result.manufacturing_to_display_transform is not None
     )
     native_display = result.native_display_envelope
     return {
@@ -185,6 +191,11 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
             ),
             "printer_native_sha256": _sha256("native_sha256", result.native_sha256),
         },
+        "manufacturing_to_display_transform": (
+            None
+            if result.manufacturing_to_display_transform is None
+            else result.manufacturing_to_display_transform.manifest()
+        ),
         "native_display_envelope_mm": (
             None
             if native_display is None
@@ -216,6 +227,6 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
         "plate_plan": plate_manifest,
         "review_rule": (
             "The exact selected printer-native bounding rectangle is retained in UVtools display coordinates. "
-            "When a physically validated manufacturing-to-display transform exists, its mapped manufacturing-axis bounds drive packing and may authorize deterministic placement; otherwise only native width/depth support acceptance-candidate packing and physical placement stays blocked."
+            "When a physically validated manufacturing-to-display transform exists, that exact transform is bound into the selected plan, its mapped manufacturing-axis bounds drive packing, and later materialization must verify the live profile still matches it; otherwise only native width/depth support acceptance-candidate packing and physical placement stays blocked."
         ),
     }
