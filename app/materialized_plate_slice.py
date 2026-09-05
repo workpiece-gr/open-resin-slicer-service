@@ -18,6 +18,14 @@ from .engine import (
     parse_uvtools_issues,
 )
 from .profiles import Profile
+from .uvtools_metrics import (
+    NativeArtifactMetrics,
+    UVtoolsMetricError,
+    base_property_command,
+    layer_property_command,
+    parse_base_native_properties,
+    parse_native_artifact_metrics,
+)
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -41,6 +49,7 @@ class MaterializedPlateNativeArtifact:
     native_filename: str
     issue_summary: dict[str, int]
     issue_text: str
+    native_metrics: NativeArtifactMetrics
     printer_profile_id: str
 
 
@@ -94,6 +103,35 @@ def _require_uvtools_status(result: subprocess.CompletedProcess[str], action: st
         )
 
 
+def _extract_native_metrics(
+    native_path: Path,
+    *,
+    uvtools_cmd: str,
+    uvtools_timeout: int,
+) -> NativeArtifactMetrics:
+    base = _run(
+        base_property_command(uvtools_cmd, str(native_path)),
+        timeout=uvtools_timeout,
+    )
+    _require_uvtools_status(base, "plate base-property extraction")
+    try:
+        layer_count, _, _ = parse_base_native_properties(base.stdout)
+        layers = _run(
+            layer_property_command(
+                uvtools_cmd,
+                str(native_path),
+                layer_count=layer_count,
+            ),
+            timeout=uvtools_timeout,
+        )
+        _require_uvtools_status(layers, "plate per-layer property extraction")
+        return parse_native_artifact_metrics(base.stdout, layers.stdout)
+    except UVtoolsMetricError as exc:
+        raise MaterializedPlateSliceError(
+            "Pinned UVtools plate-native metrics were incomplete or unparseable."
+        ) from exc
+
+
 def slice_materialized_plate_native(
     *,
     project_bytes: bytes,
@@ -111,9 +149,9 @@ def slice_materialized_plate_native(
 
     The project and effective config are both SHA-bound upstream artifacts. PrusaSlicer is
     invoked only with the retained recipe and ``--dont-arrange`` through the existing
-    pinned command builder. UVtools then converts and inspects the exact resulting SLA
-    archive. No STL import, orientation transform, centering, or profile re-resolution is
-    performed on this path.
+    pinned command builder. UVtools then converts, inspects, and measures the exact
+    resulting native artifact. No STL import, orientation transform, centering, or profile
+    re-resolution is performed on this path.
     """
     project_hash = _verify_exact_bytes("materialized plate 3MF", project_bytes, project_sha256)
     config_hash = _verify_exact_bytes(
@@ -190,6 +228,11 @@ def slice_materialized_plate_native(
                 "UVtools found critical resin-print issues on the materialized plate; review/correction is required."
             )
 
+        native_metrics = _extract_native_metrics(
+            native_path,
+            uvtools_cmd=uvtools_cmd,
+            uvtools_timeout=uvtools_timeout,
+        )
         intermediate = intermediate_path.read_bytes()
         native = native_path.read_bytes()
 
@@ -206,5 +249,6 @@ def slice_materialized_plate_native(
         native_filename=f"workpiece-materialized-plate.{native_format}",
         issue_summary=issues,
         issue_text=issue_text,
+        native_metrics=native_metrics,
         printer_profile_id=printer.id,
     )
