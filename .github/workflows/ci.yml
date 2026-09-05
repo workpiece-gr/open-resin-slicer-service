@@ -20,33 +20,105 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
 
-  container-acceptance:
-    # Avoid doing the expensive PrusaSlicer source build twice for PR branches.
+  toolchain-pin:
     if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    outputs:
+      ready: ${{ steps.lock.outputs.ready }}
+      ref: ${{ steps.lock.outputs.ref }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Resolve immutable resin toolchain lock
+        id: lock
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
 
-      - name: Build pinned resin slicer image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          tags: workpiece-resin-slicer:acceptance
-          # Cache every intermediate Prusa/dependency layer so normal service/profile
-          # changes do not rebuild the pinned C++ toolchain from scratch.
-          cache-from: type=gha,scope=resin-slicer-prusa-2.9.6
-          cache-to: type=gha,mode=max,scope=resin-slicer-prusa-2.9.6
+          lock = json.loads(Path('toolchain.lock.json').read_text())
+          assert lock['schema'] == 'workpiece-resin-toolchain-lock-v1'
+          assert lock['prusaslicer'] == {
+              'version': '2.9.6',
+              'commit': 'b028299c770b8380ee81c921a2867d522f288123',
+          }
+          assert lock['uvtools']['version'] == '6.2.0'
+          assert lock['uvtools']['archive_sha256'] == 'cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f'
+
+          status = lock['status']
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          if status == 'unpublished':
+              assert lock['digest'] is None
+              with output.open('a') as handle:
+                  handle.write('ready=false\n')
+                  handle.write('ref=\n')
+              print('Toolchain is intentionally unpublished; container acceptance remains blocked.')
+          elif status == 'published':
+              digest = lock['digest']
+              assert isinstance(digest, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', digest), digest
+              image = lock['image']
+              assert isinstance(image, str) and image.startswith('ghcr.io/') and '@' not in image
+              ref = f'{image}@{digest}'
+              with output.open('a') as handle:
+                  handle.write('ready=true\n')
+                  handle.write(f'ref={ref}\n')
+              print(f'Locked toolchain: {ref}')
+          else:
+              raise AssertionError(f'unsupported toolchain lock status: {status!r}')
+          PY
+
+  container-acceptance:
+    needs:
+      - unit
+      - toolchain-pin
+    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && needs.toolchain-pin.outputs.ready == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TOOLCHAIN_REF: ${{ needs.toolchain-pin.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull immutable resin toolchain
+        run: docker pull "$TOOLCHAIN_REF"
+
+      - name: Build Workpiece resin service image
+        run: |
+          docker build \
+            --build-arg "TOOLCHAIN_IMAGE=$TOOLCHAIN_REF" \
+            -t workpiece-resin-slicer:acceptance \
+            .
+
+      - name: Verify locked toolchain inside service image
+        run: |
+          docker run --rm \
+            --entrypoint /bin/cat \
+            workpiece-resin-slicer:acceptance \
+            /opt/workpiece-toolchain/manifest.json > toolchain-runtime-manifest.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          lock = json.loads(Path('toolchain.lock.json').read_text())
+          manifest = json.loads(Path('toolchain-runtime-manifest.json').read_text())
+          assert manifest == {
+              'schema': 'workpiece-resin-toolchain-v1',
+              'prusaslicer_version': lock['prusaslicer']['version'],
+              'prusaslicer_commit': lock['prusaslicer']['commit'],
+              'uvtools_version': lock['uvtools']['version'],
+              'uvtools_archive_sha256': lock['uvtools']['archive_sha256'],
+          }
+          print('Runtime toolchain matches lock contract.')
+          PY
 
       - name: Start acceptance service
         run: |
           docker run -d --name workpiece-resin-acceptance \
             -p 18080:8080 \
             -e WORKPIECE_RESIN_PROJECT_API_TOKEN=acceptance-token \
+            -e "WORKPIECE_RESIN_TOOLCHAIN_REF=$TOOLCHAIN_REF" \
             workpiece-resin-slicer:acceptance
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18080/health > health.json; then
@@ -205,6 +277,7 @@ jobs:
             acceptance-bundle.zip
             acceptance-headers.txt
             health.json
+            toolchain-runtime-manifest.json
             acceptance-out/
           if-no-files-found: error
 
