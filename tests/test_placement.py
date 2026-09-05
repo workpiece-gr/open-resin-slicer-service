@@ -4,6 +4,7 @@ from app.placement import (
     Envelope2D,
     PlacementError,
     derive_plate_translations,
+    expected_instance_envelope,
     validate_materialized_plate,
 )
 from app.plate import plan_rectangular_instances
@@ -34,11 +35,40 @@ def test_translation_targets_envelope_center_not_model_origin():
     first = transforms[0]
     assert (first.target_x_mm, first.target_y_mm) == (20.0, 20.0)
     assert (first.translate_x_mm, first.translate_y_mm) == (-95.0, 25.0)
-    placed = source.translated(first.translate_x_mm, first.translate_y_mm)
+    placed = expected_instance_envelope(source, first)
     assert (placed.min_x_mm, placed.max_x_mm, placed.min_y_mm, placed.max_y_mm) == (5.0, 35.0, 5.0, 35.0)
 
 
-def test_translation_rejects_footprint_drift_before_materialization():
+def test_common_90_rotation_is_defined_around_exact_envelope_center():
+    plan = plan_rectangular_instances(
+        footprint_width_mm=50,
+        footprint_depth_mm=20,
+        quantity=2,
+        plate_width_mm=50,
+        plate_depth_mm=110,
+        spacing_mm=5,
+        edge_margin_mm=2.5,
+        allow_rotate_90=True,
+    )
+    assert plan.rotation_z_deg == 90
+    source = Envelope2D(100, 150, -20, 0)  # centre (125, -10), 50 x 20
+    transforms = derive_plate_translations(
+        plan,
+        plate_index=1,
+        pretranslation_envelope=source,
+    )
+    first = transforms[0]
+    assert first.rotation_z_deg == 90
+    assert first.translate_x_mm == first.target_x_mm - 125
+    assert first.translate_y_mm == first.target_y_mm - (-10)
+    placed = expected_instance_envelope(source, first)
+    assert placed.width_mm == 20
+    assert placed.depth_mm == 50
+    assert placed.center_x_mm == first.target_x_mm
+    assert placed.center_y_mm == first.target_y_mm
+
+
+def test_translation_rejects_source_footprint_drift_before_materialization():
     plan = _two_instance_plan()
     with pytest.raises(PlacementError, match="width differs"):
         derive_plate_translations(
