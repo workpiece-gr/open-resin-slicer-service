@@ -115,6 +115,7 @@ def test_selected_ctb_native_envelope_drives_profile_backed_plate_plan_dimension
     assert result.pretranslation_envelope.width_mm == 30
     assert result.pretranslation_envelope.depth_mm == 30
     assert result.pretranslation_coordinate_space == "uvtools-native-display-millimetres"
+    assert result.native_display_envelope == result.pretranslation_envelope
     assert result.printer_plate_plan.plan.instance_footprint_width_mm == 30
     assert result.printer_plate_plan.plan.instance_footprint_depth_mm == 30
     assert result.printer_plate_plan.printer_profile_id == "elegoo-mars-2"
@@ -162,7 +163,7 @@ def test_manifest_binds_native_envelope_and_keeps_mars2_non_authoritative():
         quantity=3,
     )
     manifest = orientation_plate_plan_manifest(result)
-    assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v2"
+    assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v3"
     assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["selected_review_3mf_sha256"] == PROJECT_SHA
     assert manifest["selected_sliced_artifacts"] == {
@@ -171,6 +172,10 @@ def test_manifest_binds_native_envelope_and_keeps_mars2_non_authoritative():
         "intermediate_sl1_sha256": INTERMEDIATE_SHA,
         "printer_native_sha256": NATIVE_SHA,
     }
+    native_display = manifest["native_display_envelope_mm"]
+    assert native_display["width"] == 30
+    assert native_display["depth"] == 30
+    assert native_display["coordinate_space"] == "uvtools-native-display-millimetres"
     envelope = manifest["supported_pretranslation_envelope_mm"]
     assert envelope["width"] == 30
     assert envelope["depth"] == 30
