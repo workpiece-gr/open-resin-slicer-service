@@ -4,27 +4,17 @@ Open-source HTTP service for Workpiece MSLA/resin slicing. It is intentionally i
 
 ## Artifact chain
 
-`immutable STL -> PrusaSlicer review project (.3mf) -> PrusaSlicer SLA slice (.sl1) -> UVtools conversion/inspection -> printer-native .ctb/.goo`
+The candidate direct-slice path retains:
 
-The **review 3MF is created first** with the selected machine, resin, quality/support settings and orientation. The SLA slice is then generated from that exact retained 3MF without reloading profiles or reapplying transforms. The 3MF SHA-256 therefore sits directly in the provenance chain that produced the final printer file.
+`immutable STL -> PrusaSlicer review project (.3mf) + exact effective config -> PrusaSlicer SLA slice (.sl1) -> UVtools conversion/inspection -> printer-native .ctb/.goo`
 
-The API returns a review ZIP containing:
+The production-authority library path is stricter:
 
-- immutable source STL;
-- PrusaSlicer review `.3mf`;
-- intermediate `.sl1`;
-- exact printer-native `.ctb`/`.goo`;
-- `manifest.json` with hashes, engines, profiles and orientation;
-- raw UVtools issue report.
+`immutable STL -> deterministic orientation screening -> exact sliced-finalist validation -> selected CTB-bound envelope -> deterministic physical plate plan -> exact per-plate 3MF build-item materialization -> verified per-instance 3MF evidence -> exact retained-config per-plate SL1/native slice -> UVtools whole-plate native envelope validation -> plate authority evidence -> selected order manifest`
 
-The intended workshop flow mirrors Workpiece FDM authority as closely as resin formats allow:
+The review 3MF and exact effective config are retained together. Downstream SLA slicing uses that exact pair with `--dont-arrange`; it does not rebuild from STL, recenter the model, reapply orientation, or re-resolve profiles.
 
-1. open the retained 3MF in PrusaSlicer and inspect plate placement, orientation, SLA settings and supports;
-2. if the project is accepted **without editing it**, the bundled CTB is the exact printer file derived from that project;
-3. if the 3MF is changed, the old CTB is invalid for that review state and the bundle must be regenerated;
-4. only a physically accepted printer/resin/quality tuple may become production-authoritative.
-
-PrusaSlicer project 3MF can persist SLA support-point metadata, but automatic support generation through the CLI may instead retain the support parameters and regenerate automatic supports on project load. CP1 explicitly records which behavior the pinned build produces; physical desktop inspection remains an acceptance gate.
+The deterministic materializer changes only the selected Prusa 3MF build items. The final project must be byte-for-byte reproducible from the exact selected review 3MF, exact CTB-bound source envelope and retained placements before per-instance materialization evidence is accepted. The final native file is separately measured again with pinned UVtools.
 
 The service never sends a job to a printer automatically.
 
@@ -32,25 +22,42 @@ The service never sends a job to a printer automatically.
 
 The first machine target is **ELEGOO Mars 2** with **ELEGOO Water Washable Grey Resin**.
 
-Machine facts currently encoded in the acceptance profile:
+Machine facts currently encoded in the acceptance profile include:
 
 - 1620 x 2560 mono LCD;
-- 82.62 x 130.56 mm active display mapping used by the UVtools Mars 2 Pro profile;
-- X mirroring enabled;
+- 82.62 x 130.56 mm active display used by the UVtools Mars 2 Pro reference profile;
+- X mirroring enabled in the current native conversion reference;
 - CTB v4 conversion contract;
 - 405 nm light source;
-- Workpiece caps Z at **150 mm**, matching ELEGOO's current Mars 2 product specification rather than assuming the Mars 2 Pro's 160 mm Z height.
+- Workpiece caps Z at **150 mm**, matching ELEGOO's Mars 2 specification rather than assuming the Mars 2 Pro's 160 mm Z height.
 
-The Mars 2 profile is **candidate-ready, not production-ready**. Physical CTB acceptance on Chris's real printer is required before promotion.
+The conservative Workpiece manufacturing envelope is 80 x 129 mm, but its physical manufacturing-to-display coordinate transform is deliberately still **unverified**. The Mars 2 profile is therefore **candidate-ready, not production-ready**. No offset, axis direction or mirror transform is inferred from nominal dimensions alone.
 
-The first concrete resin profile is `elegoo-water-washable-grey`. At 0.05 mm it starts at **2.75 s normal exposure / 30 s initial exposure**, the midpoint of ELEGOO's published Mars 2 / Mars 2 Pro Ceramic Grey range. Those values are calibration seeds only, not production authority.
+The first concrete resin profile is `elegoo-water-washable-grey`. At 0.05 mm it starts at **2.75 s normal exposure / 30 s initial exposure**. Those values are calibration seeds only, not production authority.
 
 ## Candidate vs production endpoints
 
-- `POST /v1/candidate` accepts only explicitly approved **candidate combinations**. It returns an acceptance bundle and may retain UVtools issues for controlled inspection. The response is marked `X-Workpiece-Authority: acceptance-candidate-only`.
-- `POST /v1/project` accepts only separately approved **production combinations** and fails closed on configured critical UVtools issues. When eventually enabled, its response is marked `production-authoritative`.
+- `POST /v1/candidate` is the authenticated acceptance path. It accepts only explicitly approved candidate combinations and returns `X-Workpiece-Authority: acceptance-candidate-only`.
+- `POST /v1/project` is **reserved and fail-closed**. It currently returns HTTP 503 after authentication and does not slice the uploaded STL. The endpoint will remain closed until the selected-orientation/plate-authority pipeline is wired end-to-end through the HTTP service.
 
-This lets Workpiece test real hardware without pretending calibration is complete.
+Adding a `production_ready` profile or a `production_combinations` entry is therefore not enough to expose a production HTTP path. The runtime must also be explicitly changed to execute and bind the complete plate-authority chain.
+
+## Production plate authority contract
+
+A production-authoritative physical plate requires all of the following before it can appear in a production selected-order manifest:
+
+1. an explicitly production-ready printer with a validated rigid manufacturing-to-display transform;
+2. exact source/sliced-winner provenance, including review 3MF, effective config, winner SL1 and winner native hashes;
+3. deterministic per-plate 3MF materialization from the exact selected review project;
+4. byte-for-byte deterministic reconstruction of that materialized 3MF and parsed build-item transforms;
+5. per-instance supported/padded envelopes derived from the exact selected CTB envelope through those verified transforms and checked against planned slots, margins and spacing;
+6. exact per-plate Prusa slicing from the materialized 3MF + retained effective config with `--dont-arrange`;
+7. pinned UVtools conversion, issue inspection and native metrics with zero critical resin issues;
+8. final whole-plate native bounds matching the expected materialized display envelope within the bounded raster tolerance;
+9. one complete `SelectedPlateAuthorityEvidence` object bound to the retained plate 3MF/SL1/native hashes and issue receipt;
+10. a selected order manifest containing complete authority evidence for every physical plate.
+
+Creating those evidence objects does not enable a printer, deployment or production route by itself.
 
 ## Pinned engines
 
@@ -62,10 +69,13 @@ This lets Workpiece test real hardware without pretending calibration is complet
 - `GET /health`
 - `GET /source`
 - `GET /v1/profiles`
-- `POST /v1/candidate` — authenticated acceptance-only bundle
-- `POST /v1/project` — authenticated production-authority bundle; unavailable until profiles are physically validated
+- `POST /v1/orientation/proxy` — authenticated geometry-only orientation screening; never manufacturing authority
+- `POST /v1/candidate` — authenticated acceptance-only direct-slice bundle
+- `POST /v1/project` — authenticated reserved production endpoint; currently HTTP 503/fail-closed
 
-Both POST endpoints require `WORKPIECE_RESIN_PROJECT_API_TOKEN`.
+POST endpoints require `WORKPIECE_RESIN_PROJECT_API_TOKEN`.
+
+`GET /health` exposes `production_http_endpoint_ready: false` while the production HTTP orchestration remains unwired.
 
 ## Profile gate
 
@@ -77,7 +87,7 @@ A candidate slice requires:
 4. exact tuple in `candidate_combinations`;
 5. every referenced PrusaSlicer config file present.
 
-Production adds a second independent gate: all three profiles must be `production_ready` and the tuple must also be in `production_combinations`.
+Profile metadata also supports an independent production-ready state, but profile readiness is only one prerequisite of the plate-authority contract above. It cannot open `/v1/project` on its own.
 
 There is no generic Elegoo fallback.
 
@@ -87,7 +97,7 @@ There is no generic Elegoo fallback.
 python -m pytest -q
 ```
 
-Unit tests mock the external slicers. The PR CI also has a dedicated container-acceptance job that builds the pinned engines and requests a real Mars 2 grey bundle through the HTTP API.
+Unit tests mock the external slicers where appropriate. CI also contains pinned-toolchain/container acceptance coverage for the candidate service path.
 
 ## Planned Mars 2 acceptance
 
