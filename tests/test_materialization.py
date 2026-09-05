@@ -85,6 +85,7 @@ def test_finalize_binds_reextracted_envelopes_to_exact_project():
     assert manifest["schema"] == "workpiece-resin-materialized-plate-v1"
     assert manifest["project_sha256"] == digest
     assert manifest["automatic_materialization_authority"] is True
+    assert manifest["envelope_observation_source"] == "re-extracted-materialized-project"
     assert len(manifest["translations"]) == 2
     assert len(manifest["materialized_envelopes"]) == 2
 
@@ -143,12 +144,22 @@ def test_finalize_rejects_support_or_pad_drift_outside_planned_slot():
         )
 
 
-def test_observation_source_must_be_exact_materialized_project():
+def test_observation_source_rejects_unproven_planner_envelope():
     digest = "a" * 64
-    with pytest.raises(MaterializationError, match="re-extracted"):
+    with pytest.raises(MaterializationError, match="unsupported"):
         MaterializedEnvelopeObservation(
             instance_index=1,
             envelope=Envelope2D(5, 35, 5, 35),
             project_sha256=digest,
             source="planned-envelope",
         )
+
+
+def test_observation_source_accepts_verified_exact_3mf_build_item_evidence():
+    observation = MaterializedEnvelopeObservation(
+        instance_index=1,
+        envelope=Envelope2D(5, 35, 5, 35),
+        project_sha256="a" * 64,
+        source="verified-materialized-3mf-build-items",
+    )
+    assert observation.source == "verified-materialized-3mf-build-items"
