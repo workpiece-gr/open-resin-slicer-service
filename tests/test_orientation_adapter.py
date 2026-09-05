@@ -216,7 +216,7 @@ def test_critical_issue_on_one_finalist_does_not_abort_other_real_slices(monkeyp
         for item in result.validation.decision.ranked
         if item.candidate.canonical_key == (0.0, 0.0, 0.0)
     )
-    assert "islands" in blocked.blocked_reasons
+    assert "unresolved-islands" in blocked.blocked_reasons
 
 
 def test_all_blocked_finalists_return_manual_review_without_retaining_heavy_artifacts(monkeypatch):
