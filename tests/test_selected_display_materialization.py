@@ -3,7 +3,13 @@ import io
 import json
 import zipfile
 
-from app.materialization_selected import materialize_selected_plate_project
+import pytest
+
+from app.coordinate_mapping import ManufacturingDisplayTransform
+from app.materialization_selected import (
+    SelectedMaterializationError,
+    materialize_selected_plate_project,
+)
 from app.orientation_plate import (
     MANUFACTURING_ENVELOPE_COORDINATE_SPACE,
     SelectedOrientationPlatePlan,
@@ -66,8 +72,7 @@ def _registry(tmp_path) -> ProfileRegistry:
     return ProfileRegistry(tmp_path)
 
 
-def test_selected_plate_materializer_maps_centres_and_reflected_rotation(tmp_path):
-    source = _project()
+def _selected(source: bytes, transform: ManufacturingDisplayTransform) -> SelectedOrientationPlatePlan:
     plan = plan_rectangular_instances(
         footprint_width_mm=45,
         footprint_depth_mm=25,
@@ -78,7 +83,7 @@ def test_selected_plate_materializer_maps_centres_and_reflected_rotation(tmp_pat
         edge_margin_mm=5,
     )
     assert plan.rotation_z_deg == 90
-    selected = SelectedOrientationPlatePlan(
+    return SelectedOrientationPlatePlan(
         orientation_deg=(15.0, 0.0, 0.0),
         source_sha256="d" * 64,
         review_project_sha256=hashlib.sha256(source).hexdigest(),
@@ -93,11 +98,21 @@ def test_selected_plate_materializer_maps_centres_and_reflected_rotation(tmp_pat
         ),
         pretranslation_coordinate_space=MANUFACTURING_ENVELOPE_COORDINATE_SPACE,
         native_display_envelope=Envelope2D(10, 55, 20, 45),
+        manufacturing_to_display_transform=transform,
+    )
+
+
+def test_selected_plate_materializer_maps_centres_and_reflected_rotation(tmp_path):
+    source = _project()
+    registry = _registry(tmp_path)
+    selected = _selected(
+        source,
+        registry.printer_manufacturing_display_transform("printer-a"),
     )
 
     result = materialize_selected_plate_project(
         selected,
-        registry=_registry(tmp_path),
+        registry=registry,
         plate_index=1,
         selected_review_project_bytes=source,
     )
@@ -113,3 +128,26 @@ def test_selected_plate_materializer_maps_centres_and_reflected_rotation(tmp_pat
     assert result.project.sha256 == hashlib.sha256(result.project.bytes).hexdigest()
     with zipfile.ZipFile(io.BytesIO(result.project.bytes), "r") as archive:
         assert archive.read("Metadata/Slic3r_PE_sla_support_points.txt") == b"supports"
+
+
+def test_selected_plate_materializer_rejects_transform_drift(tmp_path):
+    source = _project()
+    registry = _registry(tmp_path)
+    current = registry.printer_manufacturing_display_transform("printer-a")
+    stale = ManufacturingDisplayTransform(
+        origin_display_x_mm=1,
+        origin_display_y_mm=60,
+        x_axis_display_x=1,
+        x_axis_display_y=0,
+        y_axis_display_x=0,
+        y_axis_display_y=-1,
+    )
+    selected = _selected(source, stale)
+    assert stale != current
+    with pytest.raises(SelectedMaterializationError, match="changed after"):
+        materialize_selected_plate_project(
+            selected,
+            registry=registry,
+            plate_index=1,
+            selected_review_project_bytes=source,
+        )
