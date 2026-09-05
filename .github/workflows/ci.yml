@@ -188,7 +188,7 @@ jobs:
           cat acceptance-headers.txt
           unzip -l acceptance-bundle.zip
 
-      - name: Verify bundle provenance and project structure
+      - name: Verify retained recipe provenance and project structure
         run: |
           python3 - <<'PY'
           import hashlib
@@ -202,8 +202,11 @@ jobs:
           bundle = Path('acceptance-bundle.zip').read_bytes()
           with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
               manifest = json.loads(zf.read('manifest.json'))
+              assert manifest['schema'] == 'workpiece-resin-bundle-v2'
               assert manifest['authority'] == 'acceptance-candidate-only'
-              assert manifest['provenance_chain'] == ['source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native']
+              assert manifest['provenance_chain'] == [
+                  'source_stl', 'review_3mf', 'effective_config', 'intermediate_sl1', 'printer_native'
+              ]
               assert manifest['profiles'] == {
                   'printer': 'elegoo-mars-2',
                   'resin': 'elegoo-water-washable-grey',
@@ -215,16 +218,17 @@ jobs:
                       'version': '2.9.6',
                       'commit': 'b028299c770b8380ee81c921a2867d522f288123',
                   },
-                  'uvtools': {'version': '6.2.0'},
+                  'uvtools': {'version': '6.2.0', 'normal_command_exit': 1},
               }
               assert manifest['execution_environment'] == {
                   'toolchain_image_ref': os.environ['TOOLCHAIN_REF'],
                   'immutable': True,
               }
+              assert 'indivisible retained recipe' in manifest['recipe_rule']
 
               files = manifest['files']
               payloads = {}
-              for key in ('source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native'):
+              for key in ('source_stl', 'review_3mf', 'effective_config', 'intermediate_sl1', 'printer_native'):
                   name = files[key]['name']
                   payload = zf.read(name)
                   payloads[key] = payload
@@ -233,11 +237,13 @@ jobs:
 
               assert payloads['source_stl'] == source
               assert files['review_3mf']['name'].endswith('.3mf')
+              assert files['effective_config']['name'].endswith('.ini')
               assert files['intermediate_sl1']['name'].endswith(('.sl1', '.sl1s'))
               assert files['printer_native']['name'].endswith('.ctb')
 
               Path('acceptance-out').mkdir(exist_ok=True)
               Path('acceptance-out/review.3mf').write_bytes(payloads['review_3mf'])
+              Path('acceptance-out/effective.ini').write_bytes(payloads['effective_config'])
               Path('acceptance-out/intermediate.sl1').write_bytes(payloads['intermediate_sl1'])
               Path('acceptance-out/print.ctb').write_bytes(payloads['printer_native'])
               Path('acceptance-out/manifest.json').write_bytes(zf.read('manifest.json'))
@@ -247,12 +253,11 @@ jobs:
               project_names = project_zip.namelist()
               assert '[Content_Types].xml' in project_names
               assert any(name.lower().endswith('.model') for name in project_names)
-              assert any('config' in name.lower() for name in project_names), project_names
               support_points = [name for name in project_names if 'sla_support_points' in name.lower()]
               Path('acceptance-out/project-contents.txt').write_text('\n'.join(project_names) + '\n')
               Path('acceptance-out/support-point-state.txt').write_text(
                   ('explicit support-point metadata: ' + ', '.join(support_points) + '\n') if support_points
-                  else 'no explicit support-point metadata; automatic supports must regenerate from retained SLA settings on project load\n'
+                  else 'no explicit support-point metadata; retained effective.ini remains mandatory for deterministic SLA regeneration\n'
               )
               print('3MF entries:', len(project_names))
               print('Explicit SLA support-point metadata:', bool(support_points))
@@ -260,12 +265,16 @@ jobs:
 
       - name: Extract exact native CTB metrics with pinned UVtools
         run: |
+          set +e
           docker run --rm \
             -v "$PWD/acceptance-out:/work:rw" \
             --entrypoint /opt/uvtools/UVtoolsCmd \
             workpiece-resin-slicer:acceptance \
             print-properties /work/print.ctb -n LayerCount PrintHeight BoundingRectangleMillimeters --no-progress \
             > acceptance-out/native-base-properties.txt
+          base_status=$?
+          set -e
+          test "$base_status" -eq 1
 
           python3 - <<'PY'
           from pathlib import Path
@@ -277,12 +286,16 @@ jobs:
           PY
 
           layer_count="$(cat acceptance-out/layer-count.txt)"
+          set +e
           docker run --rm \
             -v "$PWD/acceptance-out:/work:rw" \
             --entrypoint /opt/uvtools/UVtoolsCmd \
             workpiece-resin-slicer:acceptance \
             print-properties /work/print.ctb -r "0:$((layer_count - 1))" -n Area Volume --no-progress \
             > acceptance-out/native-layer-properties.txt
+          layer_status=$?
+          set -e
+          test "$layer_status" -eq 1
 
           python3 - <<'PY'
           import json
@@ -307,20 +320,26 @@ jobs:
           print(json.dumps(payload, indent=2, sort_keys=True))
           PY
 
-      - name: Regenerate exact retained 3MF
+      - name: Regenerate exact retained recipe
         run: |
           docker run --rm \
             -v "$PWD/acceptance-out:/work:rw" \
             --entrypoint /opt/prusaslicer/prusa-slicer \
             workpiece-resin-slicer:acceptance \
+            --load /work/effective.ini \
+            --dont-arrange \
             --export-sla --output /work/intermediate-repeat.sl1 /work/review.3mf
           test -s acceptance-out/intermediate-repeat.sl1
 
+          set +e
           docker run --rm \
             -v "$PWD/acceptance-out:/work:rw" \
             --entrypoint /opt/uvtools/UVtoolsCmd \
             workpiece-resin-slicer:acceptance \
             convert /work/intermediate-repeat.sl1 CTB /work/print-repeat.ctb
+          convert_status=$?
+          set -e
+          test "$convert_status" -eq 1
           test -s acceptance-out/print-repeat.ctb
 
       - name: Verify SL1 semantic determinism
@@ -342,6 +361,7 @@ jobs:
           compare_status=$?
           set -e
           cat acceptance-out/ctb-semantic-compare.txt
+          test "$compare_status" -eq 1
           python3 - <<'PY'
           from pathlib import Path
           text = Path('acceptance-out/ctb-semantic-compare.txt').read_text(errors='replace').rstrip()

@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -33,3 +34,14 @@ def test_health_exposes_resource_caps():
     assert payload["resource_limits"]["max_concurrent_slices"] == main.MAX_CONCURRENT_SLICES
     assert payload["resource_limits"]["max_concurrent_proxy_jobs"] == main.MAX_CONCURRENT_PROXY_JOBS
     assert payload["resource_limits"]["max_upload_bytes"] == main.MAX_UPLOAD_BYTES
+
+
+def test_profile_registry_snapshots_are_request_isolated(monkeypatch):
+    root = Path(__file__).resolve().parents[1] / "profiles"
+    monkeypatch.setattr(main, "PROFILE_ROOT", root)
+    first = main._registry_snapshot()
+    second = main._registry_snapshot()
+    assert first is not second
+
+    first.get("printer", "elegoo-mars-2").metadata["request-local-marker"] = True
+    assert "request-local-marker" not in second.get("printer", "elegoo-mars-2").metadata

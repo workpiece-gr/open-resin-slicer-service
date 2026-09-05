@@ -4,7 +4,6 @@ import asyncio
 import math
 import os
 import re
-from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -67,13 +66,13 @@ def _capacity_wait_seconds() -> float:
     return value
 
 
-@lru_cache(maxsize=1)
 def _registry_snapshot() -> ProfileRegistry:
-    """Cache the immutable profile set shipped with this service process.
+    """Load an isolated profile snapshot for each request path.
 
-    Profile files are image inputs, not mutable request-time state. Reloading them for
-    every health/slice call adds filesystem work and previously encouraged unsafe shared
-    mutation. A profile change intentionally requires a new process/image.
+    ProfileRegistry exposes mutable implementation details (including reload and metadata
+    dictionaries), so sharing one process-global instance would reintroduce cross-request
+    mutation/race risk. Profile loading is cheap relative to slicing and stays outside the
+    external-engine hot path.
     """
     return ProfileRegistry(PROFILE_ROOT)
 
