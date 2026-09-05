@@ -184,19 +184,21 @@ def test_real_adapter_executes_finalists_sequentially_and_retains_only_exact_win
     result = _execute()
 
     expected = [item.candidate.spec.canonical_key for item in _plan().screening.finalists]
+    expected_winner = expected[1]
+    expected_token = "a" if expected_winner[0] == 0 else "b"
     assert [item[0] for item in slice_calls] == expected
     assert all(reject_critical is False for _, reject_critical in slice_calls)
     assert result.executed_finalist_count == 2
     assert result.validation.selected_evidence is not None
-    assert result.validation.selected_evidence.canonical_key == (15.0, 0.0, 0.0)
+    assert result.validation.selected_evidence.canonical_key == expected_winner
     assert result.selected_result is not None
 
     selected = result.selected_result.artifact
-    assert selected.orientation.x == 15
-    assert selected.project_bytes == b"project-b"
-    assert selected.effective_config_bytes == b"config-b"
-    assert selected.intermediate_bytes == b"sl1-b"
-    assert selected.bytes == b"ctb-b"
+    assert selected.orientation.x == expected_winner[0]
+    assert selected.project_bytes == f"project-{expected_token}".encode()
+    assert selected.effective_config_bytes == f"config-{expected_token}".encode()
+    assert selected.intermediate_bytes == f"sl1-{expected_token}".encode()
+    assert selected.bytes == f"ctb-{expected_token}".encode()
     assert hashlib.sha256(selected.project_bytes).hexdigest() == selected.project_sha256
     assert hashlib.sha256(selected.bytes).hexdigest() == selected.native_sha256
 
