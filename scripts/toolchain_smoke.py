@@ -141,7 +141,7 @@ def main() -> int:
             report,
             "native-ctb",
             "/opt/uvtools/UVtoolsCmd",
-            ["convert", "/work/production.sl1", "CTB", "/work/production.ctb"],
+            ["convert", "/work/production.sl1", "auto", "/work/production.ctb"],
             expected_returncode=UVTOOLS_SUCCESS_EXIT,
         )
         native_ok = require_file(report, "production.ctb") and native_ok
