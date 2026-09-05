@@ -33,7 +33,7 @@ def resolve_toolchain_ref(*, required: bool = False) -> str | None:
 
 def toolchain_record(ref: str | None) -> dict[str, object]:
     return {
-        "image_ref": ref,
+        "toolchain_image_ref": ref,
         "immutable": ref is not None,
     }
 
@@ -54,10 +54,9 @@ def bind_bundle_toolchain(bundle: bytes, ref: str | None) -> bytes:
         members = {name: source.read(name) for name in names}
 
     manifest = json.loads(members["manifest.json"])
-    engine = manifest.setdefault("engine", {})
-    if not isinstance(engine, dict):
-        raise ToolchainProvenanceError("Resin manifest engine field is invalid.")
-    engine["toolchain"] = toolchain_record(ref)
+    if not isinstance(manifest, dict):
+        raise ToolchainProvenanceError("Resin manifest root is invalid.")
+    manifest["execution_environment"] = toolchain_record(ref)
     members["manifest.json"] = json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")
 
     output = io.BytesIO()
@@ -71,5 +70,5 @@ def bind_compact_metadata(metadata: str, ref: str | None) -> str:
     payload = json.loads(metadata)
     if not isinstance(payload, dict):
         raise ToolchainProvenanceError("Compact resin metadata must be a JSON object.")
-    payload["toolchain"] = toolchain_record(ref)
+    payload["execution_environment"] = toolchain_record(ref)
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
