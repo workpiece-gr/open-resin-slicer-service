@@ -168,12 +168,16 @@ def main() -> int:
             if not (1 <= layer_count <= 10_000):
                 report["errors"].append(f"LayerCount out of smoke-test bounds: {layer_count}")
             else:
+                # This is a capability smoke probe, not a full per-layer analysis. Keep the
+                # sampled output bounded so layer 0 cannot be discarded by MAX_OUTPUT tail
+                # truncation on taller/rotated smoke geometries.
+                sample_end = min(layer_count - 1, 4)
                 layer_ok = run_step(
                     report,
                     "native-layer-properties",
                     "/opt/uvtools/UVtoolsCmd",
                     [
-                        "print-properties", "/work/production.ctb", "-r", f"0:{layer_count - 1}",
+                        "print-properties", "/work/production.ctb", "-r", f"0:{sample_end}",
                         "-n", "Area", "Volume", "--no-progress",
                     ],
                     expected_returncode=UVTOOLS_SUCCESS_EXIT,
