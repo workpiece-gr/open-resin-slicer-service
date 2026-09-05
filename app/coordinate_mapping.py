@@ -83,6 +83,13 @@ class ManufacturingDisplayTransform:
             )
         return cls(**{name: value[name] for name in required})
 
+    @property
+    def determinant(self) -> float:
+        return (
+            self.x_axis_display_x * self.y_axis_display_y
+            - self.x_axis_display_y * self.y_axis_display_x
+        )
+
     def to_display(self, x_mm: float, y_mm: float) -> tuple[float, float]:
         x = _finite("manufacturing x_mm", x_mm)
         y = _finite("manufacturing y_mm", y_mm)
@@ -99,6 +106,46 @@ class ManufacturingDisplayTransform:
             dx * self.x_axis_display_x + dy * self.x_axis_display_y,
             dx * self.y_axis_display_x + dy * self.y_axis_display_y,
         )
+
+    def display_bounds_to_manufacturing_bounds(
+        self,
+        *,
+        min_display_x_mm: float,
+        max_display_x_mm: float,
+        min_display_y_mm: float,
+        max_display_y_mm: float,
+    ) -> tuple[float, float, float, float]:
+        """Return the conservative manufacturing-axis bounds of a display-space rectangle."""
+        min_x = _finite("min_display_x_mm", min_display_x_mm)
+        max_x = _finite("max_display_x_mm", max_display_x_mm)
+        min_y = _finite("min_display_y_mm", min_display_y_mm)
+        max_y = _finite("max_display_y_mm", max_display_y_mm)
+        if max_x <= min_x or max_y <= min_y:
+            raise CoordinateMappingError("Display bounds must have strictly positive width and depth.")
+        corners = tuple(
+            self.to_manufacturing(x, y)
+            for x, y in (
+                (min_x, min_y),
+                (max_x, min_y),
+                (min_x, max_y),
+                (max_x, max_y),
+            )
+        )
+        xs = [item[0] for item in corners]
+        ys = [item[1] for item in corners]
+        return (min(xs), max(xs), min(ys), max(ys))
+
+    def display_rotation_for_manufacturing(self, rotation_z_deg: int) -> int:
+        """Map Workpiece's physical 0/+90 degree rotation into display coordinates.
+
+        A reflected coordinate transform reverses handedness, so manufacturing +90 degrees
+        is display -90 degrees. Proper rotations preserve the sign.
+        """
+        if isinstance(rotation_z_deg, bool) or rotation_z_deg not in {0, 90}:
+            raise CoordinateMappingError("Manufacturing plate rotation must be 0 or 90 degrees.")
+        if rotation_z_deg == 0:
+            return 0
+        return 90 if self.determinant > 0 else -90
 
     def validate_envelope_inside_display(
         self,

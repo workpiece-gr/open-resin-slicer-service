@@ -10,6 +10,8 @@ from app.toolchain import (
     bind_bundle_toolchain,
     bind_compact_metadata,
     resolve_toolchain_ref,
+    toolchain_record,
+    validate_toolchain_record,
 )
 
 
@@ -40,6 +42,43 @@ def test_mutable_toolchain_tag_is_rejected(monkeypatch):
 def test_immutable_ghcr_digest_is_accepted(monkeypatch):
     monkeypatch.setenv(TOOLCHAIN_REF_ENV, VALID_REF)
     assert resolve_toolchain_ref(required=True) == VALID_REF
+
+
+def test_toolchain_record_rejects_mutable_ref_instead_of_marking_it_immutable():
+    with pytest.raises(ToolchainProvenanceError, match="mutable tag"):
+        toolchain_record("ghcr.io/workpiece-gr/resin-slicer-toolchain:latest")
+
+
+def test_validate_carried_toolchain_record_requires_exact_immutable_digest_for_production():
+    assert validate_toolchain_record(
+        {"toolchain_image_ref": VALID_REF, "immutable": True},
+        required=True,
+    ) == {
+        "toolchain_image_ref": VALID_REF,
+        "immutable": True,
+    }
+    with pytest.raises(ToolchainProvenanceError, match="requires an immutable toolchain"):
+        validate_toolchain_record(None, required=True)
+    with pytest.raises(ToolchainProvenanceError, match="immutable=true"):
+        validate_toolchain_record(
+            {"toolchain_image_ref": VALID_REF, "immutable": False},
+            required=True,
+        )
+    with pytest.raises(ToolchainProvenanceError, match="exactly"):
+        validate_toolchain_record(
+            {"toolchain_image_ref": VALID_REF, "immutable": True, "extra": "no"},
+            required=True,
+        )
+
+
+def test_nonproduction_carried_toolchain_may_explicitly_record_unresolved_environment():
+    assert validate_toolchain_record(
+        {"toolchain_image_ref": None, "immutable": False},
+        required=False,
+    ) == {
+        "toolchain_image_ref": None,
+        "immutable": False,
+    }
 
 
 def test_bundle_binding_records_toolchain_without_changing_payload_or_engine_contract():

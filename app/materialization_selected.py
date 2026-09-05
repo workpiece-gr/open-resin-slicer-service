@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Iterable
 
+from .coordinate_mapping import CoordinateMappingError
 from .materialization import (
     MaterializedEnvelopeObservation,
     MaterializedPlateEvidence,
@@ -16,9 +17,17 @@ from .orientation_plate import (
     MANUFACTURING_ENVELOPE_COORDINATE_SPACE,
     SelectedOrientationPlatePlan,
 )
+from .placement import Envelope2D
+from .profiles import ProfileError, ProfileRegistry
+from .prusa_3mf_instances import (
+    DisplayInstancePlacement,
+    Materialized3MFProject,
+    ThreeMFMaterializationError,
+    materialize_prusa_project_instances,
+)
 
 
-SELECTED_MATERIALIZATION_SCHEMA = "workpiece-resin-selected-materialized-plate-v1"
+SELECTED_MATERIALIZATION_SCHEMA = "workpiece-resin-selected-materialized-plate-v2"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -44,6 +53,14 @@ class SelectedPlateMaterializationSpec:
     selected_intermediate_sl1_sha256: str
     selected_printer_native_sha256: str
     plate_spec: PlateMaterializationSpec
+
+
+@dataclass(frozen=True)
+class SelectedPlateProjectMaterialization:
+    spec: SelectedPlateMaterializationSpec
+    source_display_envelope: Envelope2D
+    display_placements: tuple[DisplayInstancePlacement, ...]
+    project: Materialized3MFProject
 
 
 @dataclass(frozen=True)
@@ -73,10 +90,10 @@ def prepare_selected_plate_materialization(
 ) -> SelectedPlateMaterializationSpec:
     """Prepare one plate only from the exact source-bound sliced-orientation winner.
 
-    Native-display envelope coordinates are valid for packing dimensions but cannot drive
-    automatic physical translation. Default materialization therefore also requires the
-    selected pretranslation envelope to have been explicitly converted into the validated
-    Workpiece manufacturing-envelope coordinate space.
+    Native-display envelope coordinates are valid for candidate packing dimensions but
+    cannot drive automatic physical translation. Default materialization therefore
+    requires both a manufacturing-space pretranslation envelope and the exact validated
+    transform that produced it to be bound into the selected plan.
     """
     source_hash = _sha256("source_sha256", selected_plan.source_sha256)
     review_hash = _sha256(
@@ -95,10 +112,11 @@ def prepare_selected_plate_materialization(
     coordinate_ready = (
         selected_plan.pretranslation_coordinate_space
         == MANUFACTURING_ENVELOPE_COORDINATE_SPACE
+        and selected_plan.manufacturing_to_display_transform is not None
     )
     if require_validated_mapping and not coordinate_ready:
         raise SelectedMaterializationError(
-            "Selected supported envelope is not expressed in validated manufacturing-envelope coordinates; a physical mapping transform is required before automatic materialization."
+            "Selected supported envelope is not bound to a validated manufacturing-to-display transform; a physical mapping transform is required before automatic materialization."
         )
 
     plate_spec = prepare_printer_plate_materialization(
@@ -118,6 +136,94 @@ def prepare_selected_plate_materialization(
         selected_intermediate_sl1_sha256=intermediate_hash,
         selected_printer_native_sha256=native_hash,
         plate_spec=plate_spec,
+    )
+
+
+def materialize_selected_plate_project(
+    selected_plan: SelectedOrientationPlatePlan,
+    *,
+    registry: ProfileRegistry,
+    plate_index: int,
+    selected_review_project_bytes: bytes,
+) -> SelectedPlateProjectMaterialization:
+    """Create the exact per-plate Prusa 3MF from validated manufacturing placements.
+
+    The exact transform used to create the manufacturing-space plan is retained in the
+    selected plan. Materialization first verifies that the current printer profile still
+    resolves to the same transform, preventing mapping drift between planning and output.
+    Manufacturing target centres are then converted into display millimetres. A reflected
+    mapping reverses the sign of a common +90 degree plate rotation. The exact CTB-bound
+    native display envelope remains the rotation pivot for the selected review project and
+    is retained with the materialized result for final native-envelope validation.
+    """
+    spec = prepare_selected_plate_materialization(
+        selected_plan,
+        plate_index=plate_index,
+        require_validated_mapping=True,
+    )
+    printer_profile_id = selected_plan.printer_plate_plan.printer_profile_id
+    source_display_envelope = selected_plan.native_display_envelope
+    bound_transform = selected_plan.manufacturing_to_display_transform
+    if source_display_envelope is None:
+        raise SelectedMaterializationError(
+            "Selected plan does not retain the exact CTB-bound native display envelope required for 3MF materialization."
+        )
+    if bound_transform is None:
+        raise SelectedMaterializationError(
+            "Selected plan does not retain the validated manufacturing-to-display transform used for planning."
+        )
+    try:
+        current_transform = registry.printer_manufacturing_display_transform(
+            printer_profile_id
+        )
+    except ProfileError as exc:
+        raise SelectedMaterializationError(str(exc)) from exc
+    if current_transform != bound_transform:
+        raise SelectedMaterializationError(
+            "Printer manufacturing-to-display transform changed after the selected plate plan was created; replan before materialization."
+        )
+
+    try:
+        placements: list[DisplayInstancePlacement] = []
+        for item in spec.plate_spec.translations:
+            display_x, display_y = bound_transform.to_display(
+                item.target_x_mm,
+                item.target_y_mm,
+            )
+            placements.append(
+                DisplayInstancePlacement(
+                    instance_index=item.instance_index,
+                    target_display_x_mm=display_x,
+                    target_display_y_mm=display_y,
+                    rotation_z_deg=bound_transform.display_rotation_for_manufacturing(
+                        item.rotation_z_deg
+                    ),
+                )
+            )
+        display_placements = tuple(placements)
+    except (CoordinateMappingError, ThreeMFMaterializationError) as exc:
+        raise SelectedMaterializationError(str(exc)) from exc
+
+    try:
+        project = materialize_prusa_project_instances(
+            selected_review_project_bytes,
+            source_project_sha256=spec.selected_review_3mf_sha256,
+            source_display_envelope=source_display_envelope,
+            placements=display_placements,
+        )
+    except ThreeMFMaterializationError as exc:
+        raise SelectedMaterializationError(str(exc)) from exc
+
+    expected_indices = tuple(item.instance_index for item in spec.plate_spec.translations)
+    if project.instance_indices != expected_indices:
+        raise SelectedMaterializationError(
+            "Materialized 3MF instance indices differ from the exact selected physical plate plan."
+        )
+    return SelectedPlateProjectMaterialization(
+        spec=spec,
+        source_display_envelope=source_display_envelope,
+        display_placements=display_placements,
+        project=project,
     )
 
 
@@ -183,6 +289,6 @@ def selected_materialized_plate_manifest(
         "materialized_plate": materialized_plate_manifest(evidence.materialized_plate),
         "provenance_rule": (
             "This per-plate 3MF output was materialized through the selected-orientation path from the exact source-bound sliced winner and its retained effective config; "
-            "its final supported/padded envelopes are separately re-extracted and bound to the exact plate 3MF hash. Native-display envelope coordinates never authorize physical translation until a validated manufacturing-coordinate transform has been applied."
+            "manufacturing target centres are mapped through the exact validated printer transform bound at planning time into display-space build-item transforms, the live profile must still match that transform, and final supported/padded envelopes must still be separately re-extracted and bound to the exact plate 3MF hash."
         ),
     }

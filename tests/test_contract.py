@@ -70,8 +70,11 @@ def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
     assert "sha256sum -c" in toolchain_dockerfile
 
 
-def test_production_slicing_has_no_critical_issue_rejection_escape_hatch():
+def test_production_http_contract_uses_selected_authority_pipeline_without_promoting_mars2():
     root = Path(__file__).parents[1]
     main_source = (root / "app/main.py").read_text("utf-8")
-    assert "REJECT_ON_CRITICAL_UVTOOLS_ISSUES" not in main_source
-    assert "reject_critical=production" in main_source
+    assert "execute_selected_production_order" in main_source
+    assert "build_selected_production_bundle" in main_source
+    assert '"production_http_endpoint_ready": True' in main_source
+    assert "resolve_production" not in main_source
+    assert "manual rotate_x/rotate_y/rotate_z overrides are not accepted" in main_source
