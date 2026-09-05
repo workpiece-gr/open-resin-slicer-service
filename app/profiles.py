@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .coordinate_mapping import CoordinateMappingError, ManufacturingDisplayTransform
+
 
 class ProfileError(ValueError):
     pass
@@ -27,6 +29,7 @@ class ManufacturingEnvelope:
     width_mm: float
     depth_mm: float
     coordinate_mapping: str
+    display_transform: ManufacturingDisplayTransform | None = None
 
 
 class ProfileRegistry:
@@ -59,12 +62,44 @@ class ProfileRegistry:
         return value
 
     @classmethod
+    def _validated_display_transform(
+        cls,
+        profile: Profile,
+        *,
+        width_mm: float,
+        depth_mm: float,
+    ) -> ManufacturingDisplayTransform:
+        transform_key = "manufacturing_to_display_transform"
+        if transform_key not in profile.metadata:
+            raise ProfileError(
+                f"{profile.id} validated manufacturing-envelope coordinate mapping requires {transform_key}."
+            )
+        if "display_width_mm" not in profile.metadata or "display_height_mm" not in profile.metadata:
+            raise ProfileError(
+                f"{profile.id} validated manufacturing-envelope coordinate mapping requires display_width_mm and display_height_mm."
+            )
+        try:
+            transform = ManufacturingDisplayTransform.from_mapping(
+                profile.metadata[transform_key]
+            )
+            transform.validate_envelope_inside_display(
+                width_mm=width_mm,
+                depth_mm=depth_mm,
+                display_width_mm=cls._positive_metadata_float(profile, "display_width_mm"),
+                display_height_mm=cls._positive_metadata_float(profile, "display_height_mm"),
+            )
+        except CoordinateMappingError as exc:
+            raise ProfileError(f"{profile.id} {transform_key} is invalid: {exc}") from exc
+        return transform
+
+    @classmethod
     def _validate_printer_geometry(cls, profile: Profile) -> None:
         width_key = "manufacturing_envelope_width_mm"
         depth_key = "manufacturing_envelope_depth_mm"
         mapping_key = "manufacturing_envelope_coordinate_mapping"
+        transform_key = "manufacturing_to_display_transform"
         envelope_keys = (width_key, depth_key, mapping_key)
-        has_any_envelope_key = any(key in profile.metadata for key in envelope_keys)
+        has_any_envelope_key = any(key in profile.metadata for key in (*envelope_keys, transform_key))
 
         if not has_any_envelope_key:
             if profile.production_ready:
@@ -89,14 +124,21 @@ class ProfileRegistry:
                 + "."
             )
 
-        if "display_width_mm" in profile.metadata:
-            display_width = cls._positive_metadata_float(profile, "display_width_mm")
-            if width > display_width + 1e-9:
-                raise ProfileError(f"{profile.id} manufacturing envelope width exceeds display width.")
-        if "display_height_mm" in profile.metadata:
-            display_height = cls._positive_metadata_float(profile, "display_height_mm")
-            if depth > display_height + 1e-9:
-                raise ProfileError(f"{profile.id} manufacturing envelope depth exceeds display height.")
+        if mapping == "validated":
+            cls._validated_display_transform(
+                profile,
+                width_mm=width,
+                depth_mm=depth,
+            )
+        else:
+            if "display_width_mm" in profile.metadata:
+                display_width = cls._positive_metadata_float(profile, "display_width_mm")
+                if width > display_width + 1e-9:
+                    raise ProfileError(f"{profile.id} manufacturing envelope width exceeds display width.")
+            if "display_height_mm" in profile.metadata:
+                display_height = cls._positive_metadata_float(profile, "display_height_mm")
+                if depth > display_height + 1e-9:
+                    raise ProfileError(f"{profile.id} manufacturing envelope depth exceeds display height.")
 
         if profile.production_ready and mapping != "validated":
             raise ProfileError(
@@ -177,16 +219,39 @@ class ProfileRegistry:
         mapping_key = "manufacturing_envelope_coordinate_mapping"
         if any(key not in profile.metadata for key in (width_key, depth_key, mapping_key)):
             raise ProfileError(f"Printer {printer_id} does not define a manufacturing envelope.")
+        width = self._positive_metadata_float(profile, width_key)
+        depth = self._positive_metadata_float(profile, depth_key)
+        mapping = str(profile.metadata[mapping_key]).strip()
+        display_transform = (
+            self._validated_display_transform(profile, width_mm=width, depth_mm=depth)
+            if mapping == "validated"
+            else None
+        )
         envelope = ManufacturingEnvelope(
-            width_mm=self._positive_metadata_float(profile, width_key),
-            depth_mm=self._positive_metadata_float(profile, depth_key),
-            coordinate_mapping=str(profile.metadata[mapping_key]).strip(),
+            width_mm=width,
+            depth_mm=depth,
+            coordinate_mapping=mapping,
+            display_transform=display_transform,
         )
         if require_coordinate_mapping and envelope.coordinate_mapping != "validated":
             raise ProfileError(
                 f"Printer {printer_id} manufacturing-envelope coordinate mapping is not physically validated."
             )
         return envelope
+
+    def printer_manufacturing_display_transform(
+        self,
+        printer_id: str,
+    ) -> ManufacturingDisplayTransform:
+        envelope = self.printer_manufacturing_envelope(
+            printer_id,
+            require_coordinate_mapping=True,
+        )
+        if envelope.display_transform is None:
+            raise ProfileError(
+                f"Printer {printer_id} does not define a validated manufacturing-to-display transform."
+            )
+        return envelope.display_transform
 
     @staticmethod
     def _require_configs(profiles: tuple[Profile, Profile, Profile]) -> None:
@@ -223,6 +288,7 @@ class ProfileRegistry:
             "display_pixels_y", "display_width_mm", "display_height_mm",
             "manufacturing_envelope_width_mm", "manufacturing_envelope_depth_mm",
             "manufacturing_envelope_coordinate_mapping", "manufacturing_envelope_status",
+            "manufacturing_to_display_transform",
         }
         def items(kind: str) -> list[dict[str, Any]]:
             return [
