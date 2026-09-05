@@ -42,6 +42,9 @@ class NativeArtifact:
     project_bytes: bytes
     project_filename: str
     project_sha256: str
+    effective_config_bytes: bytes
+    effective_config_filename: str
+    effective_config_sha256: str
     intermediate_bytes: bytes
     intermediate_filename: str
     bytes: bytes
@@ -102,26 +105,34 @@ def build_prusa_project_command(
     prusa_bin: str,
     input_stl: Path,
     output_3mf: Path,
+    output_effective_config: Path,
     printer: Profile,
     resin: Profile,
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    """Build the exact review project first; every later artifact derives from this 3MF."""
+    """Export oriented review geometry and the merged effective SLA configuration."""
     return [
         prusa_bin,
         *_profile_args(printer, resin, quality),
         *_orientation_args(orientation),
+        "--save", str(output_effective_config),
         "--export-3mf",
         "--output", str(output_3mf),
         str(input_stl),
     ]
 
 
-def build_prusa_slice_command(prusa_bin: str, input_project: Path, output_sl1: Path) -> list[str]:
-    """Slice the retained 3MF itself. Do not reload profiles or reapply transforms here."""
+def build_prusa_slice_command(
+    prusa_bin: str,
+    input_project: Path,
+    effective_config: Path,
+    output_sl1: Path,
+) -> list[str]:
+    """Slice retained geometry using the exact merged config; never reapply orientation."""
     return [
         prusa_bin,
+        "--load", str(effective_config),
         "--export-sla",
         "--output", str(output_sl1),
         str(input_project),
@@ -137,7 +148,7 @@ def build_prusa_command(
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    """Legacy helper retained for callers/tests; new production path is 3MF-first."""
+    """Legacy helper retained for callers/tests; authoritative path is recipe-first."""
     return [
         prusa_bin,
         *_profile_args(printer, resin, quality),
@@ -207,41 +218,60 @@ def slice_native(
         root = Path(temp)
         input_path = root / "source.stl"
         project_path = root / "review.3mf"
+        effective_config_path = root / "effective.ini"
         intermediate_path = root / "production.sl1"
         native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
-        # 1) Build the human-review project. It carries model placement/orientation and
-        #    the exact printer/material/quality settings used for subsequent slicing.
+        # 1) Export the oriented geometry and, in the same pinned Prusa invocation,
+        #    save the fully merged effective SLA config. Prusa CLI --export-3mf passes
+        #    a null config pointer to its 3MF writer, so this separate config file is an
+        #    intentional part of the recipe rather than pretending the 3MF embeds it.
         project = _run(
             build_prusa_project_command(
-                prusa_bin, input_path, project_path, printer, resin, quality, orientation
+                prusa_bin,
+                input_path,
+                project_path,
+                effective_config_path,
+                printer,
+                resin,
+                quality,
+                orientation,
             ),
             timeout=slice_timeout,
         )
         if project.returncode != 0:
-            raise EngineError(f"PrusaSlicer 3MF project export failed: {project.stdout[-2000:]}")
+            raise EngineError(f"PrusaSlicer recipe export failed: {project.stdout[-2000:]}")
         if not project_path.is_file() or project_path.stat().st_size == 0:
             candidates = list(root.glob("*.3mf"))
             if len(candidates) == 1:
                 project_path = candidates[0]
             else:
-                raise EngineError("PrusaSlicer did not produce the expected review 3MF project.")
+                raise EngineError(f"PrusaSlicer did not produce the expected review 3MF: {project.stdout[-2000:]}")
+        if not effective_config_path.is_file() or effective_config_path.stat().st_size == 0:
+            raise EngineError(f"PrusaSlicer did not produce the merged effective SLA config: {project.stdout[-2000:]}")
 
-        # 2) Slice the exact retained 3MF, with no second profile load or transform pass.
-        #    This makes the project hash part of the authoritative provenance chain.
+        # 2) Slice the retained oriented geometry using that exact merged config.
+        #    Do not reapply rotations. Single-model placement remains PrusaSlicer's
+        #    slicing behavior in CP1; explicit plate coordinates become authoritative
+        #    in the later plate-layout checkpoint.
         sliced = _run(
-            build_prusa_slice_command(prusa_bin, project_path, intermediate_path),
+            build_prusa_slice_command(
+                prusa_bin, project_path, effective_config_path, intermediate_path
+            ),
             timeout=slice_timeout,
         )
         if sliced.returncode != 0:
-            raise EngineError(f"PrusaSlicer SLA export from review 3MF failed: {sliced.stdout[-2000:]}")
+            raise EngineError(f"PrusaSlicer SLA export from retained recipe failed: {sliced.stdout[-2000:]}")
         if not intermediate_path.is_file() or intermediate_path.stat().st_size == 0:
             candidates = list(root.glob("*.sl1")) + list(root.glob("*.sl1s"))
             if len(candidates) == 1:
                 intermediate_path = candidates[0]
             else:
-                raise EngineError("PrusaSlicer did not produce the expected SLA archive from the review 3MF.")
+                raise EngineError(
+                    "PrusaSlicer returned success but produced no SLA archive from the retained recipe: "
+                    f"{sliced.stdout[-2000:]}"
+                )
 
         # 3) Convert to the exact printer-native file and inspect it.
         conversion = _run(
@@ -260,12 +290,16 @@ def slice_native(
             raise EngineError("UVtools found critical resin-print issues; human review/correction is required.")
 
         project_bytes = project_path.read_bytes()
+        effective_config_bytes = effective_config_path.read_bytes()
         intermediate = intermediate_path.read_bytes()
         native = native_path.read_bytes()
         return NativeArtifact(
             project_bytes=project_bytes,
             project_filename=f"{safe_stem}-workpiece-review.3mf",
             project_sha256=_sha(project_bytes),
+            effective_config_bytes=effective_config_bytes,
+            effective_config_filename=f"{safe_stem}-workpiece-effective.ini",
+            effective_config_sha256=_sha(effective_config_bytes),
             intermediate_bytes=intermediate,
             intermediate_filename=f"{safe_stem}-workpiece-intermediate.sl1",
             bytes=native,
@@ -288,6 +322,15 @@ def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authori
         "schema": "workpiece-resin-bundle-v1",
         "authority": authority,
         "provenance_chain": ["source_stl", "review_3mf", "intermediate_sl1", "printer_native"],
+        "slice_recipe": {
+            "geometry": "review_3mf",
+            "configuration": "effective_config",
+            "review_3mf_role": (
+                "Oriented geometry/review artifact exported by the pinned Prusa CLI; "
+                "it is not treated as a self-contained Prusa configuration project."
+            ),
+            "effective_config_role": "Merged effective SLA configuration saved by the same pinned Prusa invocation.",
+        },
         "engine": {
             "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT},
             "uvtools": {"version": UVTOOLS_VERSION},
@@ -305,14 +348,15 @@ def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authori
         "files": {
             "source_stl": {"name": source_filename, "sha256": artifact.source_sha256},
             "review_3mf": {"name": artifact.project_filename, "sha256": artifact.project_sha256},
+            "effective_config": {"name": artifact.effective_config_filename, "sha256": artifact.effective_config_sha256},
             "intermediate_sl1": {"name": artifact.intermediate_filename, "sha256": artifact.intermediate_sha256},
             "printer_native": {"name": artifact.filename, "sha256": artifact.native_sha256},
             "uvtools_issues": {"name": "uvtools-issues.txt"},
         },
         "issues": artifact.issue_summary,
         "review_rule": (
-            "The CTB is valid only for this exact review 3MF hash. If the 3MF is edited, "
-            "do not print the bundled CTB; regenerate the bundle from the revised project."
+            "The printer-native artifact is valid only for this exact review 3MF hash and effective-config hash. "
+            "If either recipe artifact is edited, do not print the bundled native file; regenerate the bundle."
         ),
     }
 
@@ -332,6 +376,7 @@ def build_review_bundle(source: bytes, *, original_name: str, artifact: NativeAr
     with zipfile.ZipFile(buffer, "w") as zf:
         _zip_write(zf, source_filename, source)
         _zip_write(zf, artifact.project_filename, artifact.project_bytes)
+        _zip_write(zf, artifact.effective_config_filename, artifact.effective_config_bytes)
         _zip_write(zf, artifact.intermediate_filename, artifact.intermediate_bytes)
         _zip_write(zf, artifact.filename, artifact.bytes)
         _zip_write(zf, "uvtools-issues.txt", artifact.issue_text.encode("utf-8", errors="replace"))
@@ -344,6 +389,7 @@ def compact_metadata(artifact: NativeArtifact) -> str:
         "engine": {"prusaslicer": PRUSA_SLICER_VERSION, "uvtools": UVTOOLS_VERSION},
         "source_sha256": artifact.source_sha256,
         "project_sha256": artifact.project_sha256,
+        "effective_config_sha256": artifact.effective_config_sha256,
         "intermediate_sha256": artifact.intermediate_sha256,
         "native_sha256": artifact.native_sha256,
         "printer_profile": artifact.printer_profile,

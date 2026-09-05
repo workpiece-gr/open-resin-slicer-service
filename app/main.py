@@ -64,7 +64,7 @@ def health() -> dict:
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
-        "artifact_contract": "source STL -> review 3MF -> intermediate SL1 -> printer-native CTB/GOO",
+        "artifact_contract": "source STL -> oriented review 3MF + effective SLA config -> intermediate SL1 -> printer-native CTB/GOO",
         "source": SOURCE_CODE_URL,
     }
 
@@ -131,6 +131,7 @@ async def _slice_request(
         "X-Workpiece-Authority": authority,
         "X-Workpiece-Source-SHA256": artifact.source_sha256,
         "X-Workpiece-Project-SHA256": artifact.project_sha256,
+        "X-Workpiece-Effective-Config-SHA256": artifact.effective_config_sha256,
         "X-Workpiece-Intermediate-SHA256": artifact.intermediate_sha256,
         "X-Workpiece-Native-SHA256": artifact.native_sha256,
         "X-Workpiece-Printer-Profile": artifact.printer_profile,

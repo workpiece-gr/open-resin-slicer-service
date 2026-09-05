@@ -87,7 +87,7 @@ jobs:
           cat acceptance-headers.txt
           unzip -l acceptance-bundle.zip
 
-      - name: Verify bundle provenance and project structure
+      - name: Verify bundle provenance and recipe structure
         run: |
           python3 - <<'PY'
           import hashlib
@@ -96,23 +96,45 @@ jobs:
           import zipfile
           from pathlib import Path
 
+          expected_source = Path('acceptance-cube.stl').read_bytes()
           bundle = Path('acceptance-bundle.zip').read_bytes()
           with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
               manifest = json.loads(zf.read('manifest.json'))
               assert manifest['authority'] == 'acceptance-candidate-only'
               assert manifest['provenance_chain'] == ['source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native']
+              assert manifest['slice_recipe']['geometry'] == 'review_3mf'
+              assert manifest['slice_recipe']['configuration'] == 'effective_config'
+              assert manifest['profiles'] == {
+                  'printer': 'elegoo-mars-2',
+                  'resin': 'elegoo-water-washable-grey',
+                  'quality': 'balanced-0p05-medium',
+              }
+              assert manifest['orientation_deg'] == {'x': 15, 'y': 0, 'z': 25}
+              assert manifest['engine']['prusaslicer'] == {
+                  'version': '2.9.6',
+                  'commit': 'b028299c770b8380ee81c921a2867d522f288123',
+              }
+              assert manifest['engine']['uvtools']['version'] == '6.2.0'
+
               files = manifest['files']
-              for key in ('source_stl', 'review_3mf', 'intermediate_sl1', 'printer_native'):
+              for key in ('source_stl', 'review_3mf', 'effective_config', 'intermediate_sl1', 'printer_native'):
                   name = files[key]['name']
                   payload = zf.read(name)
                   assert payload, f'{key} is empty'
                   assert hashlib.sha256(payload).hexdigest() == files[key]['sha256']
+
+              source_payload = zf.read(files['source_stl']['name'])
+              assert source_payload == expected_source, 'bundle source STL differs from submitted acceptance STL'
               assert files['review_3mf']['name'].endswith('.3mf')
+              assert files['effective_config']['name'].endswith('.ini')
               assert files['printer_native']['name'].endswith('.ctb')
+
               project = zf.read(files['review_3mf']['name'])
+              effective_config = zf.read(files['effective_config']['name'])
               native_name = files['printer_native']['name']
               Path('acceptance-out').mkdir(exist_ok=True)
               Path('acceptance-out/review.3mf').write_bytes(project)
+              Path('acceptance-out/effective.ini').write_bytes(effective_config)
               Path('acceptance-out/print.ctb').write_bytes(zf.read(native_name))
               Path('acceptance-out/manifest.json').write_bytes(zf.read('manifest.json'))
               Path('acceptance-out/uvtools-issues.txt').write_bytes(zf.read('uvtools-issues.txt'))
@@ -121,14 +143,19 @@ jobs:
               project_names = project_zip.namelist()
               assert '[Content_Types].xml' in project_names
               assert any(name.lower().endswith('.model') for name in project_names)
-              assert any('config' in name.lower() for name in project_names), project_names
+              embedded_config = [name for name in project_names if 'config' in name.lower()]
               support_points = [name for name in project_names if 'sla_support_points' in name.lower()]
               Path('acceptance-out/project-contents.txt').write_text('\n'.join(project_names) + '\n')
+              Path('acceptance-out/project-config-state.txt').write_text(
+                  ('non-authoritative config-like 3MF entries: ' + ', '.join(embedded_config) + '\n') if embedded_config
+                  else 'no embedded Prusa config expected; effective.ini is the authoritative slicing configuration\n'
+              )
               Path('acceptance-out/support-point-state.txt').write_text(
                   ('explicit support-point metadata: ' + ', '.join(support_points) + '\n') if support_points
-                  else 'no explicit support-point metadata; automatic supports must regenerate from retained SLA settings on project load\n'
+                  else 'no explicit support-point metadata; automatic supports regenerate from retained effective.ini during slicing\n'
               )
               print('3MF entries:', len(project_names))
+              print('Config-like 3MF entries:', embedded_config)
               print('Explicit SLA support-point metadata:', bool(support_points))
           PY
 
