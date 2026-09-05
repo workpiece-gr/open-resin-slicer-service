@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - chris/mars2-resin-toolchain-split
     paths:
       - Dockerfile.toolchain
       - toolchain.lock.json
