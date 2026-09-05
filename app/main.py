@@ -41,7 +41,6 @@ UVTOOLS_CMD = os.environ.get("UVTOOLS_CMD", "/opt/uvtools/UVtoolsCmd")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(30 * 1024 * 1024)))
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "240"))
 UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
-REJECT_CRITICAL = os.environ.get("REJECT_ON_CRITICAL_UVTOOLS_ISSUES", "1") not in {"0", "false", "False"}
 
 
 def _bounded_concurrency(name: str, default: int) -> int:
@@ -248,7 +247,7 @@ async def _slice_request(
                 uvtools_cmd=UVTOOLS_CMD,
                 slice_timeout=SLICE_TIMEOUT,
                 uvtools_timeout=UVTOOLS_TIMEOUT,
-                reject_critical=REJECT_CRITICAL if production else False,
+                reject_critical=production,
             )
             authority = "production-authoritative" if production else "acceptance-candidate-only"
             execution_environment = toolchain_record(toolchain_ref)

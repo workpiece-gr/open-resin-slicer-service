@@ -68,3 +68,10 @@ def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
     assert "UVTOOLS_VERSION=6.2.0" in toolchain_dockerfile
     assert "cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f" in toolchain_dockerfile
     assert "sha256sum -c" in toolchain_dockerfile
+
+
+def test_production_slicing_has_no_critical_issue_rejection_escape_hatch():
+    root = Path(__file__).parents[1]
+    main_source = (root / "app/main.py").read_text("utf-8")
+    assert "REJECT_ON_CRITICAL_UVTOOLS_ISSUES" not in main_source
+    assert "reject_critical=production" in main_source
