@@ -89,6 +89,7 @@ def _materialization(config_bytes: bytes) -> SelectedPlateProjectMaterialization
     )
     return SelectedPlateProjectMaterialization(
         spec=spec,
+        source_display_envelope=Envelope2D(10, 30, 20, 40),
         display_placements=(),
         project=project,
     )
@@ -223,6 +224,7 @@ def test_selected_execution_rejects_materialized_project_hash_drift_before_slice
     materialization = _materialization(config_bytes)
     broken = SelectedPlateProjectMaterialization(
         spec=materialization.spec,
+        source_display_envelope=materialization.source_display_envelope,
         display_placements=materialization.display_placements,
         project=Materialized3MFProject(
             bytes=b"tampered",
