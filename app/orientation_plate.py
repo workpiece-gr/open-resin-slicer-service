@@ -33,7 +33,10 @@ def _sha256(name: str, value: str) -> str:
 @dataclass(frozen=True)
 class SelectedOrientationPlatePlan:
     orientation_deg: tuple[float, float, float]
+    source_sha256: str
     review_project_sha256: str
+    intermediate_sha256: str
+    native_sha256: str
     pretranslation_envelope: Envelope2D
     printer_plate_plan: PrinterPlatePlan
 
@@ -66,6 +69,13 @@ def plan_selected_sliced_orientation(
             "Supported/padded envelope is not bound to the selected sliced review 3MF; re-extract from the exact selected project."
         )
 
+    source_hash = _sha256("source_sha256", sliced_validation.source_sha256)
+    selected_source_hash = _sha256("selected source_sha256", selected.source_sha256)
+    if source_hash != selected_source_hash:
+        raise OrientationPlatePlanError(
+            "Selected sliced evidence source hash does not match its validation bundle."
+        )
+
     if not isinstance(pretranslation_envelope, Envelope2D):
         raise OrientationPlatePlanError(
             "pretranslation_envelope must be an Envelope2D extracted from the selected supported/padded project."
@@ -83,7 +93,12 @@ def plan_selected_sliced_orientation(
     )
     return SelectedOrientationPlatePlan(
         orientation_deg=selected.canonical_key,
+        source_sha256=source_hash,
         review_project_sha256=selected_hash,
+        intermediate_sha256=_sha256(
+            "selected intermediate_sha256", selected.intermediate_sha256
+        ),
+        native_sha256=_sha256("selected native_sha256", selected.native_sha256),
         pretranslation_envelope=pretranslation_envelope,
         printer_plate_plan=profile_plan,
     )
@@ -97,12 +112,24 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
         "automatic_materialization_authority": plate_manifest[
             "automatic_materialization_authority"
         ],
+        "source_sha256": _sha256("source_sha256", result.source_sha256),
         "selected_orientation_deg": {
             "x": result.orientation_deg[0],
             "y": result.orientation_deg[1],
             "z": result.orientation_deg[2],
         },
-        "selected_review_3mf_sha256": result.review_project_sha256,
+        "selected_review_3mf_sha256": _sha256(
+            "review_project_sha256", result.review_project_sha256
+        ),
+        "selected_sliced_artifacts": {
+            "review_3mf_sha256": _sha256(
+                "review_project_sha256", result.review_project_sha256
+            ),
+            "intermediate_sl1_sha256": _sha256(
+                "intermediate_sha256", result.intermediate_sha256
+            ),
+            "printer_native_sha256": _sha256("native_sha256", result.native_sha256),
+        },
         "supported_pretranslation_envelope_mm": {
             "min_x": envelope.min_x_mm,
             "max_x": envelope.max_x_mm,
@@ -113,7 +140,7 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
         },
         "plate_plan": plate_manifest,
         "review_rule": (
-            "Packing dimensions come only from the actual supported/padded envelope extracted from the exact selected sliced review 3MF. "
-            "If orientation, supports, pad geometry, or the retained 3MF changes, discard this plan and re-extract/replan."
+            "Packing dimensions come only from the actual supported/padded envelope extracted from the exact selected sliced review 3MF for this exact source STL. "
+            "If source, orientation, supports, pad geometry, or the retained 3MF changes, discard this plan and re-extract/replan."
         ),
     }

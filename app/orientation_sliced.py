@@ -36,6 +36,7 @@ class SlicedFinalistEvidence:
     """Authoritative sliced measurements for one proxy-screened orientation finalist."""
 
     spec: OrientationSpec
+    source_sha256: str
     review_project_sha256: str
     intermediate_sha256: str
     native_sha256: str
@@ -53,6 +54,7 @@ class SlicedFinalistEvidence:
 
     def validate(self) -> "SlicedFinalistEvidence":
         self.spec.validate()
+        _sha256("source_sha256", self.source_sha256)
         _sha256("review_project_sha256", self.review_project_sha256)
         _sha256("intermediate_sha256", self.intermediate_sha256)
         _sha256("native_sha256", self.native_sha256)
@@ -86,6 +88,7 @@ class SlicedFinalistEvidence:
 
 @dataclass(frozen=True)
 class SlicedOrientationValidation:
+    source_sha256: str
     evidence: tuple[SlicedFinalistEvidence, ...]
     decision: OrientationDecision
 
@@ -112,6 +115,7 @@ def validate_sliced_finalists(
     expected_keys = tuple(item.candidate.spec.canonical_key for item in proxy_screening.finalists)
     expected_set = set(expected_keys)
     by_key: dict[tuple[float, float, float], SlicedFinalistEvidence] = {}
+    source_hashes: set[str] = set()
     for item in evidence:
         item.validate()
         key = item.canonical_key
@@ -120,6 +124,7 @@ def validate_sliced_finalists(
                 f"Duplicate sliced evidence for orientation {key}."
             )
         by_key[key] = item
+        source_hashes.add(_sha256("source_sha256", item.source_sha256))
 
     actual_set = set(by_key)
     if actual_set != expected_set:
@@ -129,6 +134,10 @@ def validate_sliced_finalists(
             "Sliced evidence must cover every proxy finalist exactly once; "
             f"missing={missing}, extra={extra}."
         )
+    if len(source_hashes) != 1:
+        raise SlicedOrientationValidationError(
+            "All sliced finalist evidence must derive from the same exact source STL hash."
+        )
 
     ordered = tuple(by_key[key] for key in expected_keys)
     candidates = tuple(item.spec.with_metrics(item.metrics) for item in ordered)
@@ -137,7 +146,11 @@ def validate_sliced_finalists(
         require_sliced_validation=True,
         weights=weights,
     )
-    return SlicedOrientationValidation(evidence=ordered, decision=decision)
+    return SlicedOrientationValidation(
+        source_sha256=next(iter(source_hashes)),
+        evidence=ordered,
+        decision=decision,
+    )
 
 
 def sliced_orientation_manifest(
@@ -178,13 +191,14 @@ def sliced_orientation_manifest(
             else "sliced-finalist-selected"
         ),
         "automatic_production_authority": False,
+        "source_sha256": _sha256("source_sha256", validation.source_sha256),
         "finalist_coverage": "exact",
         "decision": orientation_decision_manifest(validation.decision, weights=weights),
         "selected_artifacts": selected.artifact_record() if selected else None,
         "evidence": evidence_payload,
         "review_rule": (
-            "Only proxy finalists with exact retained 3MF/SL1/native hashes may enter sliced ranking. "
-            "This sliced decision still does not authorize production; the selected retained artifacts, "
-            "plate materialization, printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
+            "Only proxy finalists derived from the same exact source STL and carrying exact retained 3MF/SL1/native hashes may enter sliced ranking. "
+            "This sliced decision still does not authorize production; the selected retained artifacts, plate materialization, "
+            "printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
         ),
     }

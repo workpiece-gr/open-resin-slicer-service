@@ -15,6 +15,7 @@ from app.placement import Envelope2D
 from app.profiles import ProfileRegistry
 
 
+SOURCE_SHA = "d" * 64
 PROJECT_SHA = "a" * 64
 INTERMEDIATE_SHA = "b" * 64
 NATIVE_SHA = "c" * 64
@@ -48,6 +49,7 @@ def _sliced_validation(*, block_all: bool = False):
     evidence = (
         SlicedFinalistEvidence(
             spec=specs[0],
+            source_sha256=SOURCE_SHA,
             review_project_sha256=PROJECT_SHA,
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
@@ -59,6 +61,7 @@ def _sliced_validation(*, block_all: bool = False):
         ),
         SlicedFinalistEvidence(
             spec=specs[1],
+            source_sha256=SOURCE_SHA,
             review_project_sha256=PROJECT_SHA,
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
@@ -88,7 +91,10 @@ def test_selected_sliced_supported_envelope_drives_profile_backed_plate_plan():
         quantity=3,
     )
 
+    assert result.source_sha256 == SOURCE_SHA
     assert result.review_project_sha256 == PROJECT_SHA
+    assert result.intermediate_sha256 == INTERMEDIATE_SHA
+    assert result.native_sha256 == NATIVE_SHA
     assert result.pretranslation_envelope.width_mm == 30
     assert result.pretranslation_envelope.depth_mm == 30
     assert result.printer_plate_plan.plan.instance_footprint_width_mm == 30
@@ -120,7 +126,7 @@ def test_plate_plan_rejects_manual_review_only_orientation_result():
         )
 
 
-def test_manifest_keeps_mars2_candidate_materialization_non_authoritative_until_mapping_is_validated():
+def test_manifest_binds_upstream_source_and_sliced_artifacts_and_keeps_mars2_non_authoritative():
     result = plan_selected_sliced_orientation(
         registry=_registry(),
         printer_profile_id="elegoo-mars-2",
@@ -132,7 +138,13 @@ def test_manifest_keeps_mars2_candidate_materialization_non_authoritative_until_
     manifest = orientation_plate_plan_manifest(result)
 
     assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v1"
+    assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["selected_review_3mf_sha256"] == PROJECT_SHA
+    assert manifest["selected_sliced_artifacts"] == {
+        "review_3mf_sha256": PROJECT_SHA,
+        "intermediate_sl1_sha256": INTERMEDIATE_SHA,
+        "printer_native_sha256": NATIVE_SHA,
+    }
     assert manifest["supported_pretranslation_envelope_mm"]["width"] == 30
     assert manifest["plate_plan"]["printer_profile_id"] == "elegoo-mars-2"
     assert manifest["plate_plan"]["manufacturing_envelope_coordinate_mapping"] == "unverified"

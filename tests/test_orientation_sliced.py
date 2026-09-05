@@ -11,6 +11,7 @@ from app.orientation_sliced import (
 )
 
 
+SOURCE_SHA = "d" * 64
 PROJECT_SHA = "a" * 64
 INTERMEDIATE_SHA = "b" * 64
 NATIVE_SHA = "c" * 64
@@ -59,12 +60,14 @@ def _evidence(
     support_volume: float,
     support_contact: float,
     height: float,
+    source_sha: str = SOURCE_SHA,
     islands: int = 0,
     suction: int = 0,
     traps: int = 0,
 ) -> SlicedFinalistEvidence:
     return SlicedFinalistEvidence(
         spec=spec,
+        source_sha256=source_sha,
         review_project_sha256=PROJECT_SHA,
         intermediate_sha256=INTERMEDIATE_SHA,
         native_sha256=NATIVE_SHA,
@@ -126,6 +129,7 @@ def test_sliced_validation_rejects_duplicate_or_invalid_artifact_evidence():
 
     broken = SlicedFinalistEvidence(
         spec=evidence[0].spec,
+        source_sha256=SOURCE_SHA,
         review_project_sha256="bad",
         intermediate_sha256=INTERMEDIATE_SHA,
         native_sha256=NATIVE_SHA,
@@ -138,10 +142,27 @@ def test_sliced_validation_rejects_duplicate_or_invalid_artifact_evidence():
         validate_sliced_finalists(screening, (broken, evidence[1]))
 
 
+def test_sliced_validation_rejects_mixed_source_stls():
+    screening = _screening()
+    evidence = list(_exact_evidence(screening))
+    second = evidence[1]
+    evidence[1] = _evidence(
+        second.spec,
+        layer_area=second.max_layer_area_mm2,
+        support_volume=second.support_volume_mm3,
+        support_contact=second.support_contact_area_mm2,
+        height=second.z_height_mm,
+        source_sha="e" * 64,
+    )
+    with pytest.raises(SlicedOrientationValidationError, match="same exact source STL"):
+        validate_sliced_finalists(screening, evidence)
+
+
 def test_only_sliced_validation_metrics_reach_final_orientation_ranking():
     screening = _screening()
     validation = validate_sliced_finalists(screening, _exact_evidence(screening))
 
+    assert validation.source_sha256 == SOURCE_SHA
     assert validation.decision.require_sliced_validation is True
     assert validation.decision.selected is not None
     assert all(
@@ -192,12 +213,13 @@ def test_all_blocked_sliced_finalists_require_manual_review():
     assert validation.selected_evidence is None
 
 
-def test_sliced_manifest_binds_selected_orientation_to_exact_artifact_hashes():
+def test_sliced_manifest_binds_source_and_selected_orientation_to_exact_artifact_hashes():
     screening = _screening()
     validation = validate_sliced_finalists(screening, _exact_evidence(screening))
     manifest = sliced_orientation_manifest(validation)
 
     assert manifest["schema"] == "workpiece-resin-orientation-sliced-validation-v1"
+    assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["finalist_coverage"] == "exact"
     assert manifest["automatic_production_authority"] is False
     assert manifest["decision"]["require_sliced_validation"] is True
