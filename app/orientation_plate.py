@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .coordinate_mapping import CoordinateMappingError
 from .native_envelope import NativeEnvelopeError, NativeEnvelopeEvidence
 from .orientation_sliced import SlicedOrientationValidation
 from .placement import Envelope2D
@@ -11,10 +12,10 @@ from .plate import (
     plan_printer_profile_instances,
     printer_plate_plan_manifest,
 )
-from .profiles import ProfileRegistry
+from .profiles import ProfileError, ProfileRegistry
 
 
-ORIENTATION_PLATE_SCHEMA = "workpiece-resin-orientation-plate-plan-v2"
+ORIENTATION_PLATE_SCHEMA = "workpiece-resin-orientation-plate-plan-v3"
 MANUFACTURING_ENVELOPE_COORDINATE_SPACE = "workpiece-manufacturing-envelope-millimetres"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -43,6 +44,7 @@ class SelectedOrientationPlatePlan:
     pretranslation_envelope: Envelope2D
     printer_plate_plan: PrinterPlatePlan
     pretranslation_coordinate_space: str = "legacy-unverified"
+    native_display_envelope: Envelope2D | None = None
 
 
 def plan_selected_sliced_orientation(
@@ -56,11 +58,13 @@ def plan_selected_sliced_orientation(
     edge_margin_mm: float = 3.0,
     allow_rotate_90: bool = True,
 ) -> SelectedOrientationPlatePlan:
-    """Pack only the exact selected CTB's supported/padded XY envelope dimensions.
+    """Pack the exact selected CTB's supported/padded envelope conservatively.
 
-    The native envelope's width/depth are authoritative for candidate packing because they
-    come from the exact retained printer-native artifact. Its X/Y coordinates remain in
-    UVtools native display space and are *not* interpreted as manufacturing coordinates.
+    The CTB rectangle is always retained verbatim in display coordinates. If the printer
+    profile has a physically validated manufacturing-to-display transform, its four
+    rectangle corners are mapped back into manufacturing coordinates and their
+    axis-aligned bounds drive packing. Otherwise only display-space width/depth may be
+    used for acceptance-candidate planning and automatic materialization remains blocked.
     """
     selected = sliced_validation.selected_evidence
     if selected is None:
@@ -95,12 +99,34 @@ def plan_selected_sliced_orientation(
             "Selected sliced evidence source hash does not match its validation bundle."
         )
 
-    envelope = native_envelope.envelope
+    native_display_envelope = native_envelope.envelope
+    packing_envelope = native_display_envelope
+    packing_coordinate_space = native_envelope.coordinate_space
+    try:
+        printer_envelope = registry.printer_manufacturing_envelope(printer_profile_id)
+        if printer_envelope.coordinate_mapping == "validated":
+            transform = registry.printer_manufacturing_display_transform(printer_profile_id)
+            bounds = transform.display_bounds_to_manufacturing_bounds(
+                min_display_x_mm=native_display_envelope.min_x_mm,
+                max_display_x_mm=native_display_envelope.max_x_mm,
+                min_display_y_mm=native_display_envelope.min_y_mm,
+                max_display_y_mm=native_display_envelope.max_y_mm,
+            )
+            packing_envelope = Envelope2D(
+                min_x_mm=bounds[0],
+                max_x_mm=bounds[1],
+                min_y_mm=bounds[2],
+                max_y_mm=bounds[3],
+            )
+            packing_coordinate_space = MANUFACTURING_ENVELOPE_COORDINATE_SPACE
+    except (ProfileError, CoordinateMappingError) as exc:
+        raise OrientationPlatePlanError(str(exc)) from exc
+
     profile_plan = plan_printer_profile_instances(
         registry=registry,
         printer_profile_id=printer_profile_id,
-        footprint_width_mm=envelope.width_mm,
-        footprint_depth_mm=envelope.depth_mm,
+        footprint_width_mm=packing_envelope.width_mm,
+        footprint_depth_mm=packing_envelope.depth_mm,
         quantity=quantity,
         spacing_mm=spacing_mm,
         edge_margin_mm=edge_margin_mm,
@@ -119,9 +145,10 @@ def plan_selected_sliced_orientation(
             "selected intermediate_sha256", selected.intermediate_sha256
         ),
         native_sha256=selected_native_hash,
-        pretranslation_envelope=envelope,
+        pretranslation_envelope=packing_envelope,
         printer_plate_plan=profile_plan,
-        pretranslation_coordinate_space=native_envelope.coordinate_space,
+        pretranslation_coordinate_space=packing_coordinate_space,
+        native_display_envelope=native_display_envelope,
     )
 
 
@@ -131,6 +158,7 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
     coordinate_ready = (
         result.pretranslation_coordinate_space == MANUFACTURING_ENVELOPE_COORDINATE_SPACE
     )
+    native_display = result.native_display_envelope
     return {
         "schema": ORIENTATION_PLATE_SCHEMA,
         "automatic_materialization_authority": bool(
@@ -157,6 +185,20 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
             ),
             "printer_native_sha256": _sha256("native_sha256", result.native_sha256),
         },
+        "native_display_envelope_mm": (
+            None
+            if native_display is None
+            else {
+                "min_x": native_display.min_x_mm,
+                "max_x": native_display.max_x_mm,
+                "min_y": native_display.min_y_mm,
+                "max_y": native_display.max_y_mm,
+                "width": native_display.width_mm,
+                "depth": native_display.depth_mm,
+                "coordinate_space": "uvtools-native-display-millimetres",
+                "source": "exact-selected-printer-native-bounding-rectangle",
+            }
+        ),
         "supported_pretranslation_envelope_mm": {
             "min_x": envelope.min_x_mm,
             "max_x": envelope.max_x_mm,
@@ -165,12 +207,15 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
             "width": envelope.width_mm,
             "depth": envelope.depth_mm,
             "coordinate_space": result.pretranslation_coordinate_space,
-            "source": "exact-selected-printer-native-bounding-rectangle",
+            "source": (
+                "exact-selected-printer-native-bounding-rectangle-mapped-by-validated-transform"
+                if coordinate_ready
+                else "exact-selected-printer-native-bounding-rectangle"
+            ),
         },
         "plate_plan": plate_manifest,
         "review_rule": (
-            "Packing width/depth come only from the exact selected printer-native bounding rectangle, which is hash-bound to the sliced winner. "
-            "Native X/Y remain in UVtools display coordinates and must not be treated as conservative manufacturing-envelope coordinates. "
-            "Automatic physical placement remains blocked until a separately validated mapping transform converts this envelope into Workpiece manufacturing-envelope coordinates."
+            "The exact selected printer-native bounding rectangle is retained in UVtools display coordinates. "
+            "When a physically validated manufacturing-to-display transform exists, its mapped manufacturing-axis bounds drive packing and may authorize deterministic placement; otherwise only native width/depth support acceptance-candidate packing and physical placement stays blocked."
         ),
     }
