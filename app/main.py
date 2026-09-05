@@ -27,7 +27,6 @@ from .orientation_screen import MAX_PROXY_FINALISTS, OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
 from .stl import StlValidationError, validate_stl_bytes
 from .toolchain import (
-    TOOLCHAIN_REF_ENV,
     ToolchainProvenanceError,
     resolve_toolchain_ref,
     toolchain_record,
@@ -82,7 +81,7 @@ RESOURCE_CAPACITY_WAIT_SECONDS = _capacity_wait_seconds()
 SLICE_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
 PROXY_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_PROXY_JOBS)
 
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.7.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.8.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -129,7 +128,7 @@ def _toolchain_health() -> dict:
         return {**toolchain_record(ref), "valid": True}
     except ToolchainProvenanceError as exc:
         return {
-            "toolchain_image_ref": os.environ.get(TOOLCHAIN_REF_ENV) or None,
+            "toolchain_image_ref": os.environ.get("WORKPIECE_RESIN_TOOLCHAIN_IMAGE_REF") or None,
             "immutable": False,
             "valid": False,
             "error": str(exc),
@@ -156,6 +155,7 @@ def health() -> dict:
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
+        "production_http_endpoint_ready": False,
         "artifact_contract": "source STL -> review 3MF + effective config -> intermediate SL1 -> printer-native CTB/GOO",
         "source": SOURCE_CODE_URL,
     }
@@ -206,7 +206,7 @@ async def orientation_proxy(
     )
 
 
-async def _slice_request(
+async def _candidate_slice_request(
     *,
     file: UploadFile,
     printer_profile: str,
@@ -216,11 +216,11 @@ async def _slice_request(
     rotate_y: float,
     rotate_z: float,
     authorization: str | None,
-    production: bool,
 ) -> Response:
+    """Execute the explicitly non-authoritative acceptance-candidate direct slice path."""
     _authorize(authorization)
     try:
-        toolchain_ref = resolve_toolchain_ref(required=production)
+        toolchain_ref = resolve_toolchain_ref(required=False)
     except ToolchainProvenanceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -233,8 +233,11 @@ async def _slice_request(
         try:
             stl = await run_in_threadpool(validate_stl_bytes, data)
             registry = _registry_snapshot()
-            resolver = registry.resolve_production if production else registry.resolve_candidate
-            printer, resin, quality_profile = resolver(printer_profile, resin_profile, quality)
+            printer, resin, quality_profile = registry.resolve_candidate(
+                printer_profile,
+                resin_profile,
+                quality,
+            )
             artifact = await run_in_threadpool(
                 slice_native,
                 data,
@@ -247,9 +250,9 @@ async def _slice_request(
                 uvtools_cmd=UVTOOLS_CMD,
                 slice_timeout=SLICE_TIMEOUT,
                 uvtools_timeout=UVTOOLS_TIMEOUT,
-                reject_critical=production,
+                reject_critical=False,
             )
-            authority = "production-authoritative" if production else "acceptance-candidate-only"
+            authority = "acceptance-candidate-only"
             execution_environment = toolchain_record(toolchain_ref)
             bundle, bundle_filename = await run_in_threadpool(
                 build_review_bundle,
@@ -298,10 +301,15 @@ async def candidate(
     rotate_z: float = Form(0.0),
     authorization: str | None = Header(default=None),
 ) -> Response:
-    return await _slice_request(
-        file=file, printer_profile=printer_profile, resin_profile=resin_profile, quality=quality,
-        rotate_x=rotate_x, rotate_y=rotate_y, rotate_z=rotate_z,
-        authorization=authorization, production=False,
+    return await _candidate_slice_request(
+        file=file,
+        printer_profile=printer_profile,
+        resin_profile=resin_profile,
+        quality=quality,
+        rotate_x=rotate_x,
+        rotate_y=rotate_y,
+        rotate_z=rotate_z,
+        authorization=authorization,
     )
 
 
@@ -316,8 +324,11 @@ async def project(
     rotate_z: float = Form(0.0),
     authorization: str | None = Header(default=None),
 ) -> Response:
-    return await _slice_request(
-        file=file, printer_profile=printer_profile, resin_profile=resin_profile, quality=quality,
-        rotate_x=rotate_x, rotate_y=rotate_y, rotate_z=rotate_z,
-        authorization=authorization, production=True,
+    """Reserved production endpoint; fail closed until selected plate authority is wired."""
+    _authorize(authorization)
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "Production resin HTTP execution is not enabled. The production endpoint requires the selected-orientation, deterministic plate materialization, exact native slice, per-instance 3MF evidence and whole-plate native authority chain before it can return a production artifact."
+        ),
     )
