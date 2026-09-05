@@ -37,6 +37,7 @@ SELECTED_INTERMEDIATE_SHA = "b" * 64
 SELECTED_NATIVE_SHA = "c" * 64
 CONFIG_BYTES = b"exact selected effective config"
 MODEL_MEMBER = "3D/3dmodel.model"
+VALID_TOOLCHAIN = "ghcr.io/workpiece-gr/resin-slicer-toolchain@sha256:" + "a" * 64
 
 
 def _sha(data: bytes) -> str:
@@ -333,10 +334,18 @@ def test_production_selected_order_embeds_exact_complete_plate_authority(tmp_pat
         prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
         uvtools_version="6.2.0",
         authority="production-authoritative",
+        execution_environment={
+            "toolchain_image_ref": VALID_TOOLCHAIN,
+            "immutable": True,
+        },
     )
 
     assert manifest["schema"] == "workpiece-resin-order-manifest-v4"
     assert manifest["authority"] == "production-authoritative"
+    assert manifest["execution_environment"] == {
+        "toolchain_image_ref": VALID_TOOLCHAIN,
+        "immutable": True,
+    }
     assert manifest["production_enablement_performed"] is False
     assert manifest["plates"][0]["files"]["review_3mf"]["sha256"] == authority.materialized_project_sha256
     assert manifest["plates"][0]["files"]["intermediate_sl1"]["sha256"] == authority.plate_intermediate_sha256
@@ -384,4 +393,8 @@ def test_production_selected_order_rejects_authority_bound_to_different_final_na
             prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
             uvtools_version="6.2.0",
             authority="production-authoritative",
+            execution_environment={
+                "toolchain_image_ref": VALID_TOOLCHAIN,
+                "immutable": True,
+            },
         )
