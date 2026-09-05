@@ -2,9 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
-import app.main as main
 from app.profiles import ProfileError, ProfileRegistry
 
 
@@ -72,30 +70,11 @@ def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
     assert "sha256sum -c" in toolchain_dockerfile
 
 
-def test_production_http_endpoint_is_fail_closed_until_plate_authority_is_wired(monkeypatch):
+def test_production_http_contract_uses_selected_authority_pipeline_without_promoting_mars2():
     root = Path(__file__).parents[1]
     main_source = (root / "app/main.py").read_text("utf-8")
+    assert "execute_selected_production_order" in main_source
+    assert "build_selected_production_bundle" in main_source
+    assert '"production_http_endpoint_ready": True' in main_source
     assert "resolve_production" not in main_source
-    assert "production-authoritative" not in main_source
-    assert "production_http_endpoint_ready\": False" in main_source
-
-    monkeypatch.setattr(main, "PROJECT_TOKEN", "test-token")
-    client = TestClient(main.app)
-    response = client.post(
-        "/v1/project",
-        files={"file": ("part.stl", b"not-even-validated-because-route-is-closed", "application/octet-stream")},
-        data={
-            "printer_profile": "future-production-printer",
-            "resin_profile": "future-production-resin",
-            "quality": "future-production-quality",
-            "rotate_x": "0",
-            "rotate_y": "0",
-            "rotate_z": "0",
-        },
-        headers={"Authorization": "Bearer test-token"},
-    )
-    assert response.status_code == 503
-    detail = response.json()["detail"]
-    assert "Production resin HTTP execution is not enabled" in detail
-    assert "per-instance 3MF evidence" in detail
-    assert "whole-plate native authority chain" in detail
+    assert "manual rotate_x/rotate_y/rotate_z overrides are not accepted" in main_source
