@@ -53,9 +53,18 @@ def test_water_washable_reference_preserves_other_color_ranges():
     assert reference["manufacturer_ranges"]["clear-blue"]["normal_exposure_s"] == [2.5, 3.0]
 
 
-def test_dockerfile_pins_both_engines_and_uvtools_hash():
-    dockerfile = (Path(__file__).parents[1] / "Dockerfile").read_text("utf-8")
-    assert "b028299c770b8380ee81c921a2867d522f288123" in dockerfile
-    assert "UVTOOLS_VERSION=6.2.0" in dockerfile
-    assert "cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f" in dockerfile
-    assert "sha256sum -c" in dockerfile
+def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
+    root = Path(__file__).parents[1]
+    service_dockerfile = (root / "Dockerfile").read_text("utf-8")
+    toolchain_dockerfile = (root / "Dockerfile.toolchain").read_text("utf-8")
+
+    assert "ARG TOOLCHAIN_IMAGE=" in service_dockerfile
+    assert "FROM ${TOOLCHAIN_IMAGE}" in service_dockerfile
+    assert "git clone https://github.com/prusa3d/PrusaSlicer.git" not in service_dockerfile
+    assert "make -j" not in service_dockerfile
+
+    assert "PRUSA_SLICER_VERSION=2.9.6" in toolchain_dockerfile
+    assert "b028299c770b8380ee81c921a2867d522f288123" in toolchain_dockerfile
+    assert "UVTOOLS_VERSION=6.2.0" in toolchain_dockerfile
+    assert "cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f" in toolchain_dockerfile
+    assert "sha256sum -c" in toolchain_dockerfile

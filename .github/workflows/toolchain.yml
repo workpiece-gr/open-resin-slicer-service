@@ -1,0 +1,173 @@
+name: Resin Toolchain Build
+
+on:
+  push:
+    branches:
+      - chris/mars2-resin-toolchain-split
+    paths:
+      - Dockerfile.toolchain
+      - toolchain.lock.json
+      - .github/workflows/toolchain.yml
+      - scripts/toolchain_smoke.py
+      - profiles/printers/elegoo-mars-2.ini
+      - profiles/resins/elegoo-water-washable-grey.ini
+      - profiles/quality/balanced-0p05-medium.ini
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the verified toolchain to GHCR after build"
+        required: true
+        type: boolean
+        default: false
+      release_ack:
+        description: "Required only for publish: type PUBLISH_PINNED_TOOLCHAIN"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resin-toolchain-prusa-2.9.6-uvtools-6.2.0
+  cancel-in-progress: false
+
+jobs:
+  build-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build source-derived toolchain candidate
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.toolchain
+          load: true
+          push: false
+          tags: workpiece-resin-toolchain:candidate
+          cache-from: type=gha,scope=resin-toolchain-prusa-2.9.6
+          cache-to: type=gha,mode=max,scope=resin-toolchain-prusa-2.9.6
+
+      - name: Verify pinned toolchain manifest and executables
+        run: |
+          docker run --rm \
+            --entrypoint /bin/sh \
+            workpiece-resin-toolchain:candidate \
+            -lc 'test -x /opt/prusaslicer/prusa-slicer && test -x /opt/uvtools/UVtoolsCmd && cat /opt/workpiece-toolchain/manifest.json'
+
+          docker run --rm \
+            --entrypoint /opt/prusaslicer/prusa-slicer \
+            workpiece-resin-toolchain:candidate \
+            --version | tee prusaslicer-version.txt
+
+          docker run --rm \
+            --entrypoint /opt/uvtools/UVtoolsCmd \
+            workpiece-resin-toolchain:candidate \
+            --core-version | tee uvtools-version.txt
+
+          docker run --rm \
+            --entrypoint /bin/cat \
+            workpiece-resin-toolchain:candidate \
+            /opt/workpiece-toolchain/manifest.json > toolchain-manifest.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          lock = json.loads(Path('toolchain.lock.json').read_text())
+          manifest = json.loads(Path('toolchain-manifest.json').read_text())
+          assert lock['schema'] == 'workpiece-resin-toolchain-lock-v1'
+          assert manifest['schema'] == 'workpiece-resin-toolchain-v1'
+          assert manifest['prusaslicer_version'] == lock['prusaslicer']['version']
+          assert manifest['prusaslicer_commit'] == lock['prusaslicer']['commit']
+          assert manifest['uvtools_version'] == lock['uvtools']['version']
+          assert manifest['uvtools_archive_sha256'] == lock['uvtools']['archive_sha256']
+          version_text = Path('prusaslicer-version.txt').read_text(errors='replace')
+          uvtools_text = Path('uvtools-version.txt').read_text(errors='replace')
+          assert lock['prusaslicer']['version'] in version_text, version_text
+          assert lock['uvtools']['version'] in uvtools_text, uvtools_text
+          print('Pinned resin toolchain candidate verified.')
+          PY
+
+      - name: Exercise Mars 2 candidate artifact chain
+        run: python3 scripts/toolchain_smoke.py
+
+      - name: Upload verification metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resin-toolchain-verification
+          path: |
+            toolchain-manifest.json
+            prusaslicer-version.txt
+            uvtools-version.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload smoke artifacts and diagnostic report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resin-toolchain-smoke
+          path: .toolchain-smoke/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Require successful Mars 2 smoke chain
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('.toolchain-smoke/smoke-report.json').read_text())
+          assert report['schema'] == 'workpiece-resin-toolchain-smoke-v1'
+          assert report['ok'] is True, report
+          for name in ('review.3mf', 'production.sl1', 'production.ctb'):
+              assert report['files'][name]['size'] > 0, report['files'][name]
+          print('Mars 2 toolchain smoke chain verified.')
+          PY
+
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+    needs: build-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Require explicit publication acknowledgement
+        env:
+          RELEASE_ACK: ${{ inputs.release_ack }}
+        run: test "$RELEASE_ACK" = "PUBLISH_PINNED_TOOLCHAIN"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish verified pinned toolchain
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.toolchain
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/resin-slicer-toolchain:prusa-2.9.6-uvtools-6.2.0
+          cache-from: type=gha,scope=resin-toolchain-prusa-2.9.6
+
+      - name: Record immutable digest for manual lock update
+        run: |
+          echo "Published toolchain digest: ${{ steps.publish.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "Do not use the mutable tag in service CI. Update toolchain.lock.json to image@${{ steps.publish.outputs.digest }} in a reviewed commit." | tee -a "$GITHUB_STEP_SUMMARY"
