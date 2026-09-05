@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from .engine import (
     PRUSA_SLICER_COMMIT,
@@ -17,6 +17,10 @@ from .engine import (
     compact_metadata,
     slice_native,
 )
+from .orientation import OrientationPlanError
+from .orientation_pipeline import build_proxy_orientation_plan, proxy_orientation_plan_manifest
+from .orientation_proxy import OrientationProxyError
+from .orientation_screen import OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
 from .stl import StlValidationError, validate_stl_bytes
 
@@ -51,6 +55,16 @@ def _authorize(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized.")
 
 
+async def _read_stl_upload(file: UploadFile) -> tuple[str, bytes]:
+    filename = file.filename or ""
+    if not filename.lower().endswith(".stl"):
+        raise HTTPException(status_code=400, detail="Resin input must be an STL file.")
+    data = await file.read(MAX_UPLOAD_BYTES + 1)
+    if not data or len(data) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="STL exceeds the configured upload limit.")
+    return filename, data
+
+
 @app.get("/health")
 def health() -> dict:
     registry.reload()
@@ -80,6 +94,25 @@ def profiles() -> dict:
     return registry.public_summary()
 
 
+@app.post("/v1/orientation/proxy")
+async def orientation_proxy(
+    file: UploadFile = File(...),
+    finalist_limit: int = Form(5),
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Geometry-only orientation screening; never grants manufacturing authority."""
+    _authorize(authorization)
+    _, data = await _read_stl_upload(file)
+    try:
+        plan = build_proxy_orientation_plan(data, finalist_limit=finalist_limit)
+    except (OrientationPlanError, OrientationProxyError, OrientationScreenError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return JSONResponse(
+        content=proxy_orientation_plan_manifest(plan),
+        headers={"Cache-Control": "private, no-store"},
+    )
+
+
 async def _slice_request(
     *,
     file: UploadFile,
@@ -93,12 +126,7 @@ async def _slice_request(
     production: bool,
 ) -> Response:
     _authorize(authorization)
-    filename = file.filename or ""
-    if not filename.lower().endswith(".stl"):
-        raise HTTPException(status_code=400, detail="Resin input must be an STL file.")
-    data = await file.read(MAX_UPLOAD_BYTES + 1)
-    if not data or len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="STL exceeds the configured upload limit.")
+    filename, data = await _read_stl_upload(file)
     try:
         stl = validate_stl_bytes(data)
         registry.reload()
