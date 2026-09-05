@@ -115,10 +115,11 @@ def execute_selected_production_order(
     planning, deterministic 3MF materialization, exact retained-config plate slicing,
     per-instance exact-project proof, final native whole-plate proof, plate authority gate,
     and selected-order v4 manifest. Production profile resolution and an immutable runtime
-    toolchain image receipt are required before any expensive finalist slicing begins.
+    toolchain image receipt are required before any expensive finalist slicing begins, and
+    that receipt is validated again inside the selected-order authority manifest.
 
-    The function establishes evidence only. It does not deploy, enable a route, send a job
-    to a printer, or change profile readiness.
+    The function establishes evidence only. It does not deploy, send a job to a printer, or
+    change profile readiness.
     """
     if not isinstance(source_stl, bytes) or not source_stl:
         raise ProductionOrchestrationError("source_stl must contain exact non-empty STL bytes.")
@@ -128,6 +129,7 @@ def execute_selected_production_order(
 
     toolchain_ref = resolve_toolchain_ref(required=True)
     assert toolchain_ref is not None
+    execution_environment = toolchain_record(toolchain_ref)
 
     printer, resin, quality = registry.resolve_production(
         printer_profile_id,
@@ -255,9 +257,9 @@ def execute_selected_production_order(
         prusaslicer_commit=PRUSA_SLICER_COMMIT,
         uvtools_version=UVTOOLS_VERSION,
         authority=PRODUCTION_ORDER_AUTHORITY,
+        execution_environment=execution_environment,
     )
     order_manifest = dict(order_manifest)
-    order_manifest["execution_environment"] = toolchain_record(toolchain_ref)
     order_manifest["orchestration"] = {
         "schema": _PRODUCTION_ORCHESTRATION_SCHEMA,
         "proxy_finalist_count": len(proxy_plan.screening.finalists),
