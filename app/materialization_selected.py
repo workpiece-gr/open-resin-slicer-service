@@ -17,6 +17,7 @@ from .orientation_plate import (
     MANUFACTURING_ENVELOPE_COORDINATE_SPACE,
     SelectedOrientationPlatePlan,
 )
+from .placement import Envelope2D
 from .profiles import ProfileError, ProfileRegistry
 from .prusa_3mf_instances import (
     DisplayInstancePlacement,
@@ -57,6 +58,7 @@ class SelectedPlateMaterializationSpec:
 @dataclass(frozen=True)
 class SelectedPlateProjectMaterialization:
     spec: SelectedPlateMaterializationSpec
+    source_display_envelope: Envelope2D
     display_placements: tuple[DisplayInstancePlacement, ...]
     project: Materialized3MFProject
 
@@ -151,7 +153,8 @@ def materialize_selected_plate_project(
     resolves to the same transform, preventing mapping drift between planning and output.
     Manufacturing target centres are then converted into display millimetres. A reflected
     mapping reverses the sign of a common +90 degree plate rotation. The exact CTB-bound
-    native display envelope remains the rotation pivot for the selected review project.
+    native display envelope remains the rotation pivot for the selected review project and
+    is retained with the materialized result for final native-envelope validation.
     """
     spec = prepare_selected_plate_materialization(
         selected_plan,
@@ -218,6 +221,7 @@ def materialize_selected_plate_project(
         )
     return SelectedPlateProjectMaterialization(
         spec=spec,
+        source_display_envelope=source_display_envelope,
         display_placements=display_placements,
         project=project,
     )
