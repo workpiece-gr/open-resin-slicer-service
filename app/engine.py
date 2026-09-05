@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -45,6 +46,8 @@ class NativeArtifact:
     effective_config_bytes: bytes
     effective_config_filename: str
     effective_config_sha256: str
+    placement_center_x_mm: float
+    placement_center_y_mm: float
     intermediate_bytes: bytes
     intermediate_filename: str
     bytes: bytes
@@ -101,25 +104,55 @@ def _orientation_args(orientation: Orientation) -> list[str]:
     ]
 
 
+def _review_center(printer: Profile) -> tuple[float, float]:
+    try:
+        width = float(printer.metadata["display_width_mm"])
+        height = float(printer.metadata["display_height_mm"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EngineError("Printer profile must define numeric display_width_mm and display_height_mm for review placement.") from exc
+    if not (math.isfinite(width) and math.isfinite(height) and width > 0 and height > 0):
+        raise EngineError("Printer display dimensions must be finite positive values for review placement.")
+    return width / 2.0, height / 2.0
+
+
 def build_prusa_project_command(
     prusa_bin: str,
     input_stl: Path,
-    output_3mf: Path,
+    output_oriented_3mf: Path,
     output_effective_config: Path,
     printer: Profile,
     resin: Profile,
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    """Export oriented review geometry and the merged effective SLA configuration."""
+    """Export oriented seed geometry and the merged effective SLA configuration."""
     return [
         prusa_bin,
         *_profile_args(printer, resin, quality),
         *_orientation_args(orientation),
         "--save", str(output_effective_config),
         "--export-3mf",
-        "--output", str(output_3mf),
+        "--output", str(output_oriented_3mf),
         str(input_stl),
+    ]
+
+
+def build_prusa_review_command(
+    prusa_bin: str,
+    input_oriented_3mf: Path,
+    effective_config: Path,
+    output_review_3mf: Path,
+    center_x_mm: float,
+    center_y_mm: float,
+) -> list[str]:
+    """Center already-oriented geometry, then export the exact retained review 3MF."""
+    return [
+        prusa_bin,
+        "--load", str(effective_config),
+        "--center", f"{center_x_mm:g},{center_y_mm:g}",
+        "--export-3mf",
+        "--output", str(output_review_3mf),
+        str(input_oriented_3mf),
     ]
 
 
@@ -129,7 +162,7 @@ def build_prusa_slice_command(
     effective_config: Path,
     output_sl1: Path,
 ) -> list[str]:
-    """Slice retained geometry using the exact merged config; never reapply orientation."""
+    """Slice retained geometry using the exact merged config; never reapply transforms."""
     return [
         prusa_bin,
         "--load", str(effective_config),
@@ -212,26 +245,28 @@ def slice_native(
         raise EngineError("Pinned UVtoolsCmd binary is unavailable.")
 
     orientation.validate()
+    center_x_mm, center_y_mm = _review_center(printer)
     safe_stem = _safe_stem(original_name)
 
     with tempfile.TemporaryDirectory(prefix="workpiece-resin-") as temp:
         root = Path(temp)
         input_path = root / "source.stl"
+        oriented_path = root / "oriented.3mf"
         project_path = root / "review.3mf"
         effective_config_path = root / "effective.ini"
         intermediate_path = root / "production.sl1"
         native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
-        # 1) Export the oriented geometry and, in the same pinned Prusa invocation,
+        # 1) Apply the requested orientation and, in the same pinned Prusa invocation,
         #    save the fully merged effective SLA config. Prusa CLI --export-3mf passes
-        #    a null config pointer to its 3MF writer, so this separate config file is an
-        #    intentional part of the recipe rather than pretending the 3MF embeds it.
-        project = _run(
+        #    a null config pointer to its 3MF writer, so the separate effective config
+        #    is an intentional part of the retained recipe.
+        oriented = _run(
             build_prusa_project_command(
                 prusa_bin,
                 input_path,
-                project_path,
+                oriented_path,
                 effective_config_path,
                 printer,
                 resin,
@@ -240,21 +275,35 @@ def slice_native(
             ),
             timeout=slice_timeout,
         )
-        if project.returncode != 0:
-            raise EngineError(f"PrusaSlicer recipe export failed: {project.stdout[-2000:]}")
-        if not project_path.is_file() or project_path.stat().st_size == 0:
-            candidates = list(root.glob("*.3mf"))
-            if len(candidates) == 1:
-                project_path = candidates[0]
-            else:
-                raise EngineError(f"PrusaSlicer did not produce the expected review 3MF: {project.stdout[-2000:]}")
+        if oriented.returncode != 0:
+            raise EngineError(f"PrusaSlicer orientation/config export failed: {oriented.stdout[-2000:]}")
+        if not oriented_path.is_file() or oriented_path.stat().st_size == 0:
+            raise EngineError(f"PrusaSlicer did not produce the oriented 3MF seed: {oriented.stdout[-2000:]}")
         if not effective_config_path.is_file() or effective_config_path.stat().st_size == 0:
-            raise EngineError(f"PrusaSlicer did not produce the merged effective SLA config: {project.stdout[-2000:]}")
+            raise EngineError(f"PrusaSlicer did not produce the merged effective SLA config: {oriented.stdout[-2000:]}")
 
-        # 2) Slice the retained oriented geometry using that exact merged config.
-        #    Do not reapply rotations. Single-model placement remains PrusaSlicer's
-        #    slicing behavior in CP1; explicit plate coordinates become authoritative
-        #    in the later plate-layout checkpoint.
+        # 2) Center the already-oriented geometry on the active display center and
+        #    export the final retained review 3MF. This pass applies no rotations.
+        #    It is required because Prusa treats .3mf inputs as dont-arrange during
+        #    slicing; retaining an off-bed orientation would otherwise yield an empty print.
+        reviewed = _run(
+            build_prusa_review_command(
+                prusa_bin,
+                oriented_path,
+                effective_config_path,
+                project_path,
+                center_x_mm,
+                center_y_mm,
+            ),
+            timeout=slice_timeout,
+        )
+        if reviewed.returncode != 0:
+            raise EngineError(f"PrusaSlicer review placement export failed: {reviewed.stdout[-2000:]}")
+        if not project_path.is_file() or project_path.stat().st_size == 0:
+            raise EngineError(f"PrusaSlicer did not produce the centered review 3MF: {reviewed.stdout[-2000:]}")
+
+        # 3) Slice the exact retained review geometry using the exact retained config.
+        #    Do not reapply orientation or placement transforms here.
         sliced = _run(
             build_prusa_slice_command(
                 prusa_bin, project_path, effective_config_path, intermediate_path
@@ -273,7 +322,7 @@ def slice_native(
                     f"{sliced.stdout[-2000:]}"
                 )
 
-        # 3) Convert to the exact printer-native file and inspect it.
+        # 4) Convert to the exact printer-native file and inspect it.
         conversion = _run(
             [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
             timeout=uvtools_timeout,
@@ -300,6 +349,8 @@ def slice_native(
             effective_config_bytes=effective_config_bytes,
             effective_config_filename=f"{safe_stem}-workpiece-effective.ini",
             effective_config_sha256=_sha(effective_config_bytes),
+            placement_center_x_mm=center_x_mm,
+            placement_center_y_mm=center_y_mm,
             intermediate_bytes=intermediate,
             intermediate_filename=f"{safe_stem}-workpiece-intermediate.sl1",
             bytes=native,
@@ -325,11 +376,15 @@ def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authori
         "slice_recipe": {
             "geometry": "review_3mf",
             "configuration": "effective_config",
+            "placement": {
+                "method": "explicit-prusaslicer-center",
+                "center_mm": {"x": artifact.placement_center_x_mm, "y": artifact.placement_center_y_mm},
+            },
             "review_3mf_role": (
-                "Oriented geometry/review artifact exported by the pinned Prusa CLI; "
+                "Oriented and centered geometry/review artifact exported by the pinned Prusa CLI; "
                 "it is not treated as a self-contained Prusa configuration project."
             ),
-            "effective_config_role": "Merged effective SLA configuration saved by the same pinned Prusa invocation.",
+            "effective_config_role": "Merged effective SLA configuration saved by the pinned Prusa recipe invocation.",
         },
         "engine": {
             "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT},
@@ -396,6 +451,7 @@ def compact_metadata(artifact: NativeArtifact) -> str:
         "resin_profile": artifact.resin_profile,
         "quality_profile": artifact.quality_profile,
         "orientation_deg": {"x": artifact.orientation.x, "y": artifact.orientation.y, "z": artifact.orientation.z},
+        "placement_center_mm": {"x": artifact.placement_center_x_mm, "y": artifact.placement_center_y_mm},
         "issues": artifact.issue_summary,
     }
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
