@@ -97,6 +97,19 @@ jobs:
       - name: Exercise Mars 2 candidate artifact chain
         run: python3 scripts/toolchain_smoke.py
 
+      - name: Require successful Mars 2 smoke chain
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('.toolchain-smoke/smoke-report.json').read_text())
+          assert report['schema'] == 'workpiece-resin-toolchain-smoke-v1'
+          assert report['ok'] is True, report
+          for name in ('review.3mf', 'production.sl1', 'production.ctb'):
+              assert report['files'][name]['size'] > 0, report['files'][name]
+          print('Mars 2 toolchain smoke chain verified.')
+          PY
+
       - name: Upload verification metadata
         if: always()
         uses: actions/upload-artifact@v4
@@ -115,21 +128,9 @@ jobs:
         with:
           name: resin-toolchain-smoke
           path: .toolchain-smoke/
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
-
-      - name: Require successful Mars 2 smoke chain
-        run: |
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          report = json.loads(Path('.toolchain-smoke/smoke-report.json').read_text())
-          assert report['schema'] == 'workpiece-resin-toolchain-smoke-v1'
-          assert report['ok'] is True, report
-          for name in ('review.3mf', 'production.sl1', 'production.ctb'):
-              assert report['files'][name]['size'] > 0, report['files'][name]
-          print('Mars 2 toolchain smoke chain verified.')
-          PY
 
   publish:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
