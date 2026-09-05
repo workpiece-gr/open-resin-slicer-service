@@ -38,6 +38,7 @@ class SlicedFinalistEvidence:
     spec: OrientationSpec
     source_sha256: str
     review_project_sha256: str
+    effective_config_sha256: str
     intermediate_sha256: str
     native_sha256: str
     max_layer_area_mm2: float
@@ -58,6 +59,7 @@ class SlicedFinalistEvidence:
         self.spec.validate()
         _sha256("source_sha256", self.source_sha256)
         _sha256("review_project_sha256", self.review_project_sha256)
+        _sha256("effective_config_sha256", self.effective_config_sha256)
         _sha256("intermediate_sha256", self.intermediate_sha256)
         _sha256("native_sha256", self.native_sha256)
         self.metrics.validate()
@@ -82,6 +84,9 @@ class SlicedFinalistEvidence:
         return {
             "review_3mf_sha256": _sha256(
                 "review_project_sha256", self.review_project_sha256
+            ),
+            "effective_config_sha256": _sha256(
+                "effective_config_sha256", self.effective_config_sha256
             ),
             "intermediate_sl1_sha256": _sha256(
                 "intermediate_sha256", self.intermediate_sha256
@@ -200,11 +205,12 @@ def sliced_orientation_manifest(
         "source_sha256": _sha256("source_sha256", validation.source_sha256),
         "finalist_coverage": "exact",
         "metric_authority": "exact-retained-printer-native-artifact",
+        "recipe_authority": "exact-review-3mf-plus-effective-config",
         "decision": orientation_decision_manifest(validation.decision, weights=weights),
         "selected_artifacts": selected.artifact_record() if selected else None,
         "evidence": evidence_payload,
         "review_rule": (
-            "Only proxy finalists derived from the same exact source STL and carrying exact retained 3MF/SL1/native hashes may enter sliced ranking. "
+            "Only proxy finalists derived from the same exact source STL and carrying exact retained 3MF/effective-config/SL1/native hashes may enter sliced ranking. "
             "Soft ranking metrics are derived from the exact retained printer-native artifact, not hidden slicer state or geometry proxies. "
             "All engine-critical native issues are hard blockers. This decision still does not authorize production; plate materialization, printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
         ),

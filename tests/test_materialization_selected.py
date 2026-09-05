@@ -15,6 +15,7 @@ from app.plate import PrinterPlatePlan, plan_rectangular_instances
 
 SOURCE_SHA = "d" * 64
 SELECTED_PROJECT_SHA = "a" * 64
+SELECTED_CONFIG_SHA = "9" * 64
 SELECTED_INTERMEDIATE_SHA = "b" * 64
 SELECTED_NATIVE_SHA = "c" * 64
 
@@ -37,6 +38,7 @@ def _selected_plan() -> SelectedOrientationPlatePlan:
         orientation_deg=(15.0, 0.0, 0.0),
         source_sha256=SOURCE_SHA,
         review_project_sha256=SELECTED_PROJECT_SHA,
+        effective_config_sha256=SELECTED_CONFIG_SHA,
         intermediate_sha256=SELECTED_INTERMEDIATE_SHA,
         native_sha256=SELECTED_NATIVE_SHA,
         pretranslation_envelope=Envelope2D(100, 130, -20, 10),
@@ -78,12 +80,14 @@ def test_selected_materialization_binds_upstream_winner_to_exact_plate_output():
     assert evidence.source_sha256 == SOURCE_SHA
     assert evidence.selected_orientation_deg == (15.0, 0.0, 0.0)
     assert evidence.selected_review_3mf_sha256 == SELECTED_PROJECT_SHA
+    assert evidence.selected_effective_config_sha256 == SELECTED_CONFIG_SHA
     assert evidence.selected_intermediate_sl1_sha256 == SELECTED_INTERMEDIATE_SHA
     assert evidence.selected_printer_native_sha256 == SELECTED_NATIVE_SHA
     assert evidence.project_sha256 == project_sha
     assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["selected_sliced_artifacts"] == {
         "review_3mf_sha256": SELECTED_PROJECT_SHA,
+        "effective_config_sha256": SELECTED_CONFIG_SHA,
         "intermediate_sl1_sha256": SELECTED_INTERMEDIATE_SHA,
         "printer_native_sha256": SELECTED_NATIVE_SHA,
     }

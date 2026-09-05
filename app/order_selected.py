@@ -66,11 +66,16 @@ def _validate_selected_materialization(
 
     expected_hashes = (
         _sha256("selected review 3MF", selected_plan.review_project_sha256),
+        _sha256("selected effective config", selected_plan.effective_config_sha256),
         _sha256("selected intermediate SL1", selected_plan.intermediate_sha256),
         _sha256("selected printer-native file", selected_plan.native_sha256),
     )
     actual_hashes = (
         _sha256("materialization selected review 3MF", evidence.selected_review_3mf_sha256),
+        _sha256(
+            "materialization selected effective config",
+            evidence.selected_effective_config_sha256,
+        ),
         _sha256(
             "materialization selected intermediate SL1",
             evidence.selected_intermediate_sl1_sha256,
@@ -177,6 +182,6 @@ def build_selected_orientation_order_manifest(
     )
     result["review_rule"] = (
         str(manifest.get("review_rule", "")).rstrip()
-        + " The order source, orientation, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate."
+        + " The order source, orientation, effective config, selected sliced artifact chain, plate materialization and final plate files must all remain bound; callers cannot substitute an independent orientation or unrelated materialized plate."
     ).strip()
     return result

@@ -35,6 +35,7 @@ class SelectedOrientationPlatePlan:
     orientation_deg: tuple[float, float, float]
     source_sha256: str
     review_project_sha256: str
+    effective_config_sha256: str
     intermediate_sha256: str
     native_sha256: str
     pretranslation_envelope: Envelope2D
@@ -47,13 +48,14 @@ def plan_selected_sliced_orientation(
     printer_profile_id: str,
     sliced_validation: SlicedOrientationValidation,
     review_project_sha256: str,
+    effective_config_sha256: str,
     pretranslation_envelope: Envelope2D,
     quantity: int,
     spacing_mm: float = 5.0,
     edge_margin_mm: float = 3.0,
     allow_rotate_90: bool = True,
 ) -> SelectedOrientationPlatePlan:
-    """Pack only the exact selected sliced 3MF's supported/padded XY envelope."""
+    """Pack only the exact selected sliced recipe's supported/padded XY envelope."""
     selected = sliced_validation.selected_evidence
     if selected is None:
         raise OrientationPlatePlanError(
@@ -66,7 +68,16 @@ def plan_selected_sliced_orientation(
     )
     if supplied_hash != selected_hash:
         raise OrientationPlatePlanError(
-            "Supported/padded envelope is not bound to the selected sliced review 3MF; re-extract from the exact selected project."
+            "Supported/padded envelope is not bound to the selected sliced review 3MF; re-extract from the exact selected recipe."
+        )
+
+    supplied_config_hash = _sha256("effective_config_sha256", effective_config_sha256)
+    selected_config_hash = _sha256(
+        "selected effective_config_sha256", selected.effective_config_sha256
+    )
+    if supplied_config_hash != selected_config_hash:
+        raise OrientationPlatePlanError(
+            "Supported/padded envelope is not bound to the selected effective config; re-extract from the exact selected recipe."
         )
 
     source_hash = _sha256("source_sha256", sliced_validation.source_sha256)
@@ -78,7 +89,7 @@ def plan_selected_sliced_orientation(
 
     if not isinstance(pretranslation_envelope, Envelope2D):
         raise OrientationPlatePlanError(
-            "pretranslation_envelope must be an Envelope2D extracted from the selected supported/padded project."
+            "pretranslation_envelope must be an Envelope2D extracted from the selected supported/padded recipe."
         )
 
     profile_plan = plan_printer_profile_instances(
@@ -95,6 +106,7 @@ def plan_selected_sliced_orientation(
         orientation_deg=selected.canonical_key,
         source_sha256=source_hash,
         review_project_sha256=selected_hash,
+        effective_config_sha256=selected_config_hash,
         intermediate_sha256=_sha256(
             "selected intermediate_sha256", selected.intermediate_sha256
         ),
@@ -125,6 +137,9 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
             "review_3mf_sha256": _sha256(
                 "review_project_sha256", result.review_project_sha256
             ),
+            "effective_config_sha256": _sha256(
+                "effective_config_sha256", result.effective_config_sha256
+            ),
             "intermediate_sl1_sha256": _sha256(
                 "intermediate_sha256", result.intermediate_sha256
             ),
@@ -140,7 +155,7 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
         },
         "plate_plan": plate_manifest,
         "review_rule": (
-            "Packing dimensions come only from the actual supported/padded envelope extracted from the exact selected sliced review 3MF for this exact source STL. "
-            "If source, orientation, supports, pad geometry, or the retained 3MF changes, discard this plan and re-extract/replan."
+            "Packing dimensions come only from the actual supported/padded envelope extracted from the exact selected sliced 3MF + effective-config recipe for this exact source STL. "
+            "If source, config, orientation, supports, pad geometry, or retained 3MF changes, discard this plan and re-extract/replan."
         ),
     }

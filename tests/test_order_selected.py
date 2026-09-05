@@ -10,6 +10,7 @@ from app.plate import PrinterPlatePlan, plan_rectangular_instances
 
 SOURCE_SHA = "d" * 64
 SELECTED_PROJECT_SHA = "a" * 64
+SELECTED_CONFIG_SHA = "9" * 64
 SELECTED_INTERMEDIATE_SHA = "b" * 64
 SELECTED_NATIVE_SHA = "c" * 64
 PLATE_PROJECT_SHA = "e" * 64
@@ -35,6 +36,7 @@ def _selected_plan() -> SelectedOrientationPlatePlan:
         orientation_deg=(15.0, 0.0, 0.0),
         source_sha256=SOURCE_SHA,
         review_project_sha256=SELECTED_PROJECT_SHA,
+        effective_config_sha256=SELECTED_CONFIG_SHA,
         intermediate_sha256=SELECTED_INTERMEDIATE_SHA,
         native_sha256=SELECTED_NATIVE_SHA,
         pretranslation_envelope=Envelope2D(100, 130, -20, 10),
@@ -42,7 +44,11 @@ def _selected_plan() -> SelectedOrientationPlatePlan:
     )
 
 
-def _selected_plate_record(*, selected_native_sha: str = SELECTED_NATIVE_SHA):
+def _selected_plate_record(
+    *,
+    selected_native_sha: str = SELECTED_NATIVE_SHA,
+    selected_config_sha: str = SELECTED_CONFIG_SHA,
+):
     lower = MaterializedPlateEvidence(
         printer_profile_id="elegoo-mars-2",
         manufacturing_envelope_coordinate_mapping="unverified",
@@ -56,6 +62,7 @@ def _selected_plate_record(*, selected_native_sha: str = SELECTED_NATIVE_SHA):
         source_sha256=SOURCE_SHA,
         selected_orientation_deg=(15.0, 0.0, 0.0),
         selected_review_3mf_sha256=SELECTED_PROJECT_SHA,
+        selected_effective_config_sha256=selected_config_sha,
         selected_intermediate_sl1_sha256=SELECTED_INTERMEDIATE_SHA,
         selected_printer_native_sha256=selected_native_sha,
         materialized_plate=lower,
@@ -112,9 +119,11 @@ def test_selected_order_derives_orientation_and_converts_only_bound_plate_eviden
     assert manifest["selected_orientation_plan"]["source_sha256"] == SOURCE_SHA
     assert manifest["plates"][0]["selected_materialization"]["selected_sliced_artifacts"] == {
         "review_3mf_sha256": SELECTED_PROJECT_SHA,
+        "effective_config_sha256": SELECTED_CONFIG_SHA,
         "intermediate_sl1_sha256": SELECTED_INTERMEDIATE_SHA,
         "printer_native_sha256": SELECTED_NATIVE_SHA,
     }
+    assert "effective config" in manifest["review_rule"]
     assert "unrelated materialized plate" in manifest["review_rule"]
 
 
@@ -140,7 +149,14 @@ def test_selected_order_rejects_source_that_differs_from_orientation_validation(
         )
 
 
-def test_selected_order_rejects_plate_from_different_sliced_winner(monkeypatch):
+@pytest.mark.parametrize(
+    "record",
+    (
+        _selected_plate_record(selected_native_sha="3" * 64),
+        _selected_plate_record(selected_config_sha="4" * 64),
+    ),
+)
+def test_selected_order_rejects_plate_from_different_sliced_recipe(monkeypatch, record):
     def should_not_run(**kwargs):
         raise AssertionError("lower-level order builder must not run for mismatched winner")
 
@@ -154,7 +170,7 @@ def test_selected_order_rejects_plate_from_different_sliced_winner(monkeypatch):
             resin_profile="elegoo-water-washable-grey",
             quality_profile="balanced-0p05-medium",
             selected_orientation_plan=_selected_plan(),
-            plate_artifacts=(_selected_plate_record(selected_native_sha="3" * 64),),
+            plate_artifacts=(record,),
             prusaslicer_version="2.9.6",
             prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
             uvtools_version="6.2.0",

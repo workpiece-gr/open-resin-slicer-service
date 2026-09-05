@@ -57,10 +57,12 @@ def _result(
     source_sha: str = SOURCE_SHA,
     orientation_override: Orientation | None = None,
     measurement_project_sha: str | None = None,
+    measurement_config_sha: str | None = None,
     printer_profile: str = "elegoo-mars-2",
 ) -> FinalistSliceResult:
     token = "a" if spec.canonical_key[0] == 0 else "b"
     project_sha = token * 64
+    config_sha = ("7" if token == "a" else "8") * 64
     intermediate_sha = ("c" if token == "a" else "d") * 64
     native_sha = ("e" if token == "a" else "f") * 64
     artifact = NativeArtifact(
@@ -87,10 +89,14 @@ def _result(
         resin_profile="elegoo-water-washable-grey",
         quality_profile="balanced-0p05-medium",
         orientation=orientation_override or Orientation(spec.x_deg, spec.y_deg, spec.z_deg),
+        effective_config_bytes=b"config-" + token.encode(),
+        effective_config_filename=f"{token}.ini",
+        effective_config_sha256=config_sha,
     )
     measurements = SlicedMeasurements(
         source_sha256=source_sha,
         review_project_sha256=measurement_project_sha or project_sha,
+        effective_config_sha256=measurement_config_sha or config_sha,
         intermediate_sha256=intermediate_sha,
         native_sha256=native_sha,
         max_layer_area_mm2=180 if token == "b" else 220,
@@ -121,6 +127,7 @@ def test_executes_exact_proxy_finalists_and_builds_native_metric_validation():
     assert execution.validation.source_sha256 == SOURCE_SHA
     assert execution.validation.selected_evidence is not None
     assert execution.validation.selected_evidence.metrics.source == "sliced-validation"
+    assert execution.validation.selected_evidence.effective_config_sha256
     assert execution.validation.selected_evidence.material_volume_mm3 > 0
     assert execution.validation.selected_evidence.footprint_area_mm2 > 0
 
@@ -191,3 +198,5 @@ def test_rejects_measurements_not_bound_to_exact_artifact_hashes():
     plan = _plan()
     with pytest.raises(SlicedFinalistExecutionError, match="review 3MF"):
         _execute(plan, lambda spec: _result(spec, measurement_project_sha="9" * 64))
+    with pytest.raises(SlicedFinalistExecutionError, match="effective config"):
+        _execute(plan, lambda spec: _result(spec, measurement_config_sha="9" * 64))

@@ -4,6 +4,7 @@ import asyncio
 import math
 import os
 import re
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -23,7 +24,7 @@ from .engine import (
 from .orientation import OrientationPlanError
 from .orientation_pipeline import build_proxy_orientation_plan, proxy_orientation_plan_manifest
 from .orientation_proxy import OrientationProxyError
-from .orientation_screen import OrientationScreenError
+from .orientation_screen import MAX_PROXY_FINALISTS, OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
 from .stl import StlValidationError, validate_stl_bytes
 from .toolchain import (
@@ -66,8 +67,14 @@ def _capacity_wait_seconds() -> float:
     return value
 
 
+@lru_cache(maxsize=1)
 def _registry_snapshot() -> ProfileRegistry:
-    """Load one immutable request snapshot instead of mutating shared profile state."""
+    """Cache the immutable profile set shipped with this service process.
+
+    Profile files are image inputs, not mutable request-time state. Reloading them for
+    every health/slice call adds filesystem work and previously encouraged unsafe shared
+    mutation. A profile change intentionally requires a new process/image.
+    """
     return ProfileRegistry(PROFILE_ROOT)
 
 
@@ -77,7 +84,7 @@ RESOURCE_CAPACITY_WAIT_SECONDS = _capacity_wait_seconds()
 SLICE_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
 PROXY_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_PROXY_JOBS)
 
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.6.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.7.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -151,7 +158,7 @@ def health() -> dict:
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
-        "artifact_contract": "source STL -> review 3MF -> intermediate SL1 -> printer-native CTB/GOO",
+        "artifact_contract": "source STL -> review 3MF + effective config -> intermediate SL1 -> printer-native CTB/GOO",
         "source": SOURCE_CODE_URL,
     }
 
@@ -174,9 +181,17 @@ async def orientation_proxy(
 ) -> JSONResponse:
     """Geometry-only orientation screening; never grants manufacturing authority."""
     _authorize(authorization)
+    if isinstance(finalist_limit, bool) or not 1 <= finalist_limit <= MAX_PROXY_FINALISTS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"finalist_limit must be between 1 and the {MAX_PROXY_FINALISTS}-candidate safety cap.",
+        )
+
+    # Read the bounded upload before occupying scarce CPU capacity. A slow client must
+    # not monopolize the only proxy worker while merely transferring bytes.
+    _, data = await _read_stl_upload(file)
     await _acquire_capacity(PROXY_CAPACITY, "Orientation proxy")
     try:
-        _, data = await _read_stl_upload(file)
         try:
             plan = await run_in_threadpool(
                 build_proxy_orientation_plan,
@@ -211,9 +226,12 @@ async def _slice_request(
     except ToolchainProvenanceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
+    # Do not hold the expensive slicer slot during network upload. Once bytes are in
+    # memory, the slot covers validation, external engines and bundle construction so
+    # concurrent requests cannot multiply their peak CPU/RAM footprint.
+    filename, data = await _read_stl_upload(file)
     await _acquire_capacity(SLICE_CAPACITY, "Resin slicing")
     try:
-        filename, data = await _read_stl_upload(file)
         try:
             stl = await run_in_threadpool(validate_stl_bytes, data)
             registry = _registry_snapshot()
@@ -255,6 +273,7 @@ async def _slice_request(
         "X-Workpiece-Authority": authority,
         "X-Workpiece-Source-SHA256": artifact.source_sha256,
         "X-Workpiece-Project-SHA256": artifact.project_sha256,
+        "X-Workpiece-Effective-Config-SHA256": artifact.effective_config_sha256,
         "X-Workpiece-Intermediate-SHA256": artifact.intermediate_sha256,
         "X-Workpiece-Native-SHA256": artifact.native_sha256,
         "X-Workpiece-Printer-Profile": artifact.printer_profile,

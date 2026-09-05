@@ -13,6 +13,7 @@ from app.orientation_sliced import (
 
 SOURCE_SHA = "d" * 64
 PROJECT_SHA = "a" * 64
+CONFIG_SHA = "9" * 64
 INTERMEDIATE_SHA = "b" * 64
 NATIVE_SHA = "c" * 64
 
@@ -52,14 +53,18 @@ def _evidence(
     footprint_area: float,
     height: float,
     source_sha: str = SOURCE_SHA,
+    config_sha: str = CONFIG_SHA,
     islands: int = 0,
     suction: int = 0,
     traps: int = 0,
+    touching_bounds: int = 0,
+    empty_layers: int = 0,
 ) -> SlicedFinalistEvidence:
     return SlicedFinalistEvidence(
         spec=spec,
         source_sha256=source_sha,
         review_project_sha256=PROJECT_SHA,
+        effective_config_sha256=config_sha,
         intermediate_sha256=INTERMEDIATE_SHA,
         native_sha256=NATIVE_SHA,
         max_layer_area_mm2=layer_area,
@@ -69,6 +74,8 @@ def _evidence(
         unresolved_islands=islands,
         unresolved_suction_cups=suction,
         unresolved_resin_traps=traps,
+        unresolved_touching_bounds=touching_bounds,
+        unresolved_empty_layers=empty_layers,
     )
 
 
@@ -102,6 +109,7 @@ def test_sliced_validation_rejects_duplicate_or_invalid_artifact_evidence():
         spec=evidence[0].spec,
         source_sha256=SOURCE_SHA,
         review_project_sha256="bad",
+        effective_config_sha256=CONFIG_SHA,
         intermediate_sha256=INTERMEDIATE_SHA,
         native_sha256=NATIVE_SHA,
         max_layer_area_mm2=100,
@@ -111,6 +119,22 @@ def test_sliced_validation_rejects_duplicate_or_invalid_artifact_evidence():
     )
     with pytest.raises(SlicedOrientationValidationError, match="SHA-256"):
         validate_sliced_finalists(screening, (broken, evidence[1]))
+
+
+def test_sliced_validation_rejects_invalid_effective_config_hash():
+    screening = _screening()
+    evidence = list(_exact_evidence(screening))
+    first = evidence[0]
+    evidence[0] = _evidence(
+        first.spec,
+        layer_area=first.max_layer_area_mm2,
+        material_volume=first.material_volume_mm3,
+        footprint_area=first.footprint_area_mm2,
+        height=first.z_height_mm,
+        config_sha="bad",
+    )
+    with pytest.raises(SlicedOrientationValidationError, match="effective_config_sha256"):
+        validate_sliced_finalists(screening, evidence)
 
 
 def test_sliced_validation_rejects_mixed_source_stls():
@@ -159,6 +183,27 @@ def test_critical_sliced_issues_hard_block_a_finalist():
     assert blocked_ranked.blocked_reasons == ("unresolved-islands",)
 
 
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    (({"touching_bounds": 1}, "touching-bounds"), ({"empty_layers": 1}, "empty-layers")),
+)
+def test_remaining_engine_critical_issues_are_hard_blockers(kwargs, reason):
+    screening = _screening()
+    evidence = list(_exact_evidence(screening))
+    blocked = evidence[1]
+    evidence[1] = _evidence(
+        blocked.spec,
+        layer_area=1,
+        material_volume=1,
+        footprint_area=1,
+        height=1,
+        **kwargs,
+    )
+    validation = validate_sliced_finalists(screening, evidence)
+    ranked = next(item for item in validation.decision.ranked if item.candidate.canonical_key == blocked.canonical_key)
+    assert reason in ranked.blocked_reasons
+
+
 def test_all_blocked_sliced_finalists_require_manual_review():
     screening = _screening()
     specs = [item.candidate.spec for item in screening.finalists]
@@ -171,7 +216,7 @@ def test_all_blocked_sliced_finalists_require_manual_review():
     assert validation.selected_evidence is None
 
 
-def test_sliced_manifest_binds_native_metrics_and_exact_artifact_hashes():
+def test_sliced_manifest_binds_recipe_native_metrics_and_exact_artifact_hashes():
     screening = _screening()
     validation = validate_sliced_finalists(screening, _exact_evidence(screening))
     manifest = sliced_orientation_manifest(validation)
@@ -179,10 +224,12 @@ def test_sliced_manifest_binds_native_metrics_and_exact_artifact_hashes():
     assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["finalist_coverage"] == "exact"
     assert manifest["metric_authority"] == "exact-retained-printer-native-artifact"
+    assert manifest["recipe_authority"] == "exact-review-3mf-plus-effective-config"
     assert manifest["automatic_production_authority"] is False
     assert manifest["decision"]["require_sliced_validation"] is True
     assert manifest["selected_artifacts"] == {
         "review_3mf_sha256": PROJECT_SHA,
+        "effective_config_sha256": CONFIG_SHA,
         "intermediate_sl1_sha256": INTERMEDIATE_SHA,
         "printer_native_sha256": NATIVE_SHA,
     }

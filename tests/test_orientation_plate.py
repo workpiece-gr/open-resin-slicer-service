@@ -17,6 +17,7 @@ from app.profiles import ProfileRegistry
 
 SOURCE_SHA = "d" * 64
 PROJECT_SHA = "a" * 64
+CONFIG_SHA = "9" * 64
 INTERMEDIATE_SHA = "b" * 64
 NATIVE_SHA = "c" * 64
 
@@ -51,6 +52,7 @@ def _sliced_validation(*, block_all: bool = False):
             spec=specs[0],
             source_sha256=SOURCE_SHA,
             review_project_sha256=PROJECT_SHA,
+            effective_config_sha256=CONFIG_SHA,
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
             max_layer_area_mm2=220,
@@ -63,6 +65,7 @@ def _sliced_validation(*, block_all: bool = False):
             spec=specs[1],
             source_sha256=SOURCE_SHA,
             review_project_sha256=PROJECT_SHA,
+            effective_config_sha256=CONFIG_SHA,
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
             max_layer_area_mm2=180,
@@ -87,11 +90,13 @@ def test_selected_sliced_supported_envelope_drives_profile_backed_plate_plan():
         printer_profile_id="elegoo-mars-2",
         sliced_validation=validation,
         review_project_sha256=PROJECT_SHA,
+        effective_config_sha256=CONFIG_SHA,
         pretranslation_envelope=envelope,
         quantity=3,
     )
     assert result.source_sha256 == SOURCE_SHA
     assert result.review_project_sha256 == PROJECT_SHA
+    assert result.effective_config_sha256 == CONFIG_SHA
     assert result.intermediate_sha256 == INTERMEDIATE_SHA
     assert result.native_sha256 == NATIVE_SHA
     assert result.pretranslation_envelope.width_mm == 30
@@ -108,6 +113,20 @@ def test_plate_plan_rejects_envelope_not_bound_to_selected_review_project():
             printer_profile_id="elegoo-mars-2",
             sliced_validation=_sliced_validation(),
             review_project_sha256="f" * 64,
+            effective_config_sha256=CONFIG_SHA,
+            pretranslation_envelope=Envelope2D(0, 30, 0, 30),
+            quantity=1,
+        )
+
+
+def test_plate_plan_rejects_envelope_not_bound_to_selected_effective_config():
+    with pytest.raises(OrientationPlatePlanError, match="effective config"):
+        plan_selected_sliced_orientation(
+            registry=_registry(),
+            printer_profile_id="elegoo-mars-2",
+            sliced_validation=_sliced_validation(),
+            review_project_sha256=PROJECT_SHA,
+            effective_config_sha256="f" * 64,
             pretranslation_envelope=Envelope2D(0, 30, 0, 30),
             quantity=1,
         )
@@ -120,17 +139,19 @@ def test_plate_plan_rejects_manual_review_only_orientation_result():
             printer_profile_id="elegoo-mars-2",
             sliced_validation=_sliced_validation(block_all=True),
             review_project_sha256=PROJECT_SHA,
+            effective_config_sha256=CONFIG_SHA,
             pretranslation_envelope=Envelope2D(0, 30, 0, 30),
             quantity=1,
         )
 
 
-def test_manifest_binds_upstream_source_and_sliced_artifacts_and_keeps_mars2_non_authoritative():
+def test_manifest_binds_upstream_source_and_sliced_recipe_and_keeps_mars2_non_authoritative():
     result = plan_selected_sliced_orientation(
         registry=_registry(),
         printer_profile_id="elegoo-mars-2",
         sliced_validation=_sliced_validation(),
         review_project_sha256=PROJECT_SHA,
+        effective_config_sha256=CONFIG_SHA,
         pretranslation_envelope=Envelope2D(100, 130, -20, 10),
         quantity=3,
     )
@@ -140,6 +161,7 @@ def test_manifest_binds_upstream_source_and_sliced_artifacts_and_keeps_mars2_non
     assert manifest["selected_review_3mf_sha256"] == PROJECT_SHA
     assert manifest["selected_sliced_artifacts"] == {
         "review_3mf_sha256": PROJECT_SHA,
+        "effective_config_sha256": CONFIG_SHA,
         "intermediate_sl1_sha256": INTERMEDIATE_SHA,
         "printer_native_sha256": NATIVE_SHA,
     }

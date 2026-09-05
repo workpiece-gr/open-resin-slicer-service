@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -18,6 +19,7 @@ from .profiles import Profile
 PRUSA_SLICER_VERSION = "2.9.6"
 PRUSA_SLICER_COMMIT = "b028299c770b8380ee81c921a2867d522f288123"
 UVTOOLS_VERSION = "6.2.0"
+UVTOOLS_SUCCESS_EXIT = 1  # pinned UVtools 6.2.0 Program.Main returns 1 after normal commands
 
 
 class EngineError(RuntimeError):
@@ -32,8 +34,14 @@ class Orientation:
 
     def validate(self) -> "Orientation":
         for value in (self.x, self.y, self.z):
-            if not (-360.0 <= value <= 360.0):
-                raise EngineError("Rotation values must be between -360 and 360 degrees.")
+            if isinstance(value, bool):
+                raise EngineError("Rotation values must be finite numbers between -360 and 360 degrees.")
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError) as exc:
+                raise EngineError("Rotation values must be finite numbers between -360 and 360 degrees.") from exc
+            if not math.isfinite(numeric) or not (-360.0 <= numeric <= 360.0):
+                raise EngineError("Rotation values must be finite numbers between -360 and 360 degrees.")
         return self
 
 
@@ -56,6 +64,9 @@ class NativeArtifact:
     resin_profile: str
     quality_profile: str
     orientation: Orientation
+    effective_config_bytes: bytes = b""
+    effective_config_filename: str = ""
+    effective_config_sha256: str = ""
 
 
 def _sha(data: bytes) -> str:
@@ -89,12 +100,31 @@ def _profile_args(printer: Profile, resin: Profile, quality: Profile) -> list[st
     ]
 
 
+def _positive_profile_number(printer: Profile, key: str) -> float:
+    raw = printer.metadata.get(key)
+    if isinstance(raw, bool):
+        raise EngineError(f"Printer profile {printer.id} requires positive finite {key}.")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise EngineError(f"Printer profile {printer.id} requires positive finite {key}.") from exc
+    if not math.isfinite(value) or value <= 0:
+        raise EngineError(f"Printer profile {printer.id} requires positive finite {key}.")
+    return value
+
+
+def _display_center_args(printer: Profile) -> list[str]:
+    width = _positive_profile_number(printer, "display_width_mm")
+    depth = _positive_profile_number(printer, "display_height_mm")
+    return ["--center", f"{width / 2:g},{depth / 2:g}"]
+
+
 def _orientation_args(orientation: Orientation) -> list[str]:
     orientation.validate()
     return [
-        "--rotate-x", f"{orientation.x:g}",
-        "--rotate-y", f"{orientation.y:g}",
-        "--rotate", f"{orientation.z:g}",
+        "--rotate-x", f"{float(orientation.x):g}",
+        "--rotate-y", f"{float(orientation.y):g}",
+        "--rotate", f"{float(orientation.z):g}",
     ]
 
 
@@ -102,26 +132,36 @@ def build_prusa_project_command(
     prusa_bin: str,
     input_stl: Path,
     output_3mf: Path,
+    output_effective_config: Path,
     printer: Profile,
     resin: Profile,
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    """Build the exact review project first; every later artifact derives from this 3MF."""
+    """Build retained geometry/placement and resolved config in one pinned invocation."""
     return [
         prusa_bin,
         *_profile_args(printer, resin, quality),
+        *_display_center_args(printer),
         *_orientation_args(orientation),
+        "--save", str(output_effective_config),
         "--export-3mf",
         "--output", str(output_3mf),
         str(input_stl),
     ]
 
 
-def build_prusa_slice_command(prusa_bin: str, input_project: Path, output_sl1: Path) -> list[str]:
-    """Slice the retained 3MF itself. Do not reload profiles or reapply transforms here."""
+def build_prusa_slice_command(
+    prusa_bin: str,
+    input_project: Path,
+    effective_config: Path,
+    output_sl1: Path,
+) -> list[str]:
+    """Slice the exact retained recipe pair without rearranging/reapplying transforms."""
     return [
         prusa_bin,
+        "--load", str(effective_config),
+        "--dont-arrange",
         "--export-sla",
         "--output", str(output_sl1),
         str(input_project),
@@ -137,7 +177,7 @@ def build_prusa_command(
     quality: Profile,
     orientation: Orientation,
 ) -> list[str]:
-    """Legacy helper retained for callers/tests; new production path is 3MF-first."""
+    """Legacy direct-slice helper; authoritative path uses the paired retained recipe."""
     return [
         prusa_bin,
         *_profile_args(printer, resin, quality),
@@ -175,6 +215,13 @@ def critical_issue_count(summary: dict[str, int]) -> int:
     return sum(summary.get(k, 0) for k in ("islands", "resin_traps", "suction_cups", "touching_bounds", "empty_layers"))
 
 
+def _require_uvtools_status(result: subprocess.CompletedProcess[str], action: str) -> None:
+    if result.returncode != UVTOOLS_SUCCESS_EXIT:
+        raise EngineError(
+            f"Pinned UVtools {action} failed with status {result.returncode}: {result.stdout[-2000:]}"
+        )
+
+
 def slice_native(
     source: bytes,
     *,
@@ -207,54 +254,70 @@ def slice_native(
         root = Path(temp)
         input_path = root / "source.stl"
         project_path = root / "review.3mf"
+        effective_config_path = root / "effective.ini"
         intermediate_path = root / "production.sl1"
         native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
         project = _run(
             build_prusa_project_command(
-                prusa_bin, input_path, project_path, printer, resin, quality, orientation
+                prusa_bin,
+                input_path,
+                project_path,
+                effective_config_path,
+                printer,
+                resin,
+                quality,
+                orientation,
             ),
             timeout=slice_timeout,
         )
         if project.returncode != 0:
-            raise EngineError(f"PrusaSlicer 3MF project export failed: {project.stdout[-2000:]}")
+            raise EngineError(f"PrusaSlicer retained recipe export failed: {project.stdout[-2000:]}")
         if not project_path.is_file() or project_path.stat().st_size == 0:
             candidates = list(root.glob("*.3mf"))
             if len(candidates) == 1:
                 project_path = candidates[0]
             else:
                 raise EngineError("PrusaSlicer did not produce the expected review 3MF project.")
+        if not effective_config_path.is_file() or effective_config_path.stat().st_size == 0:
+            raise EngineError("PrusaSlicer did not produce the resolved effective resin configuration.")
 
         sliced = _run(
-            build_prusa_slice_command(prusa_bin, project_path, intermediate_path),
+            build_prusa_slice_command(
+                prusa_bin, project_path, effective_config_path, intermediate_path
+            ),
             timeout=slice_timeout,
         )
         if sliced.returncode != 0:
-            raise EngineError(f"PrusaSlicer SLA export from review 3MF failed: {sliced.stdout[-2000:]}")
+            raise EngineError(f"PrusaSlicer SLA export from retained recipe failed: {sliced.stdout[-2000:]}")
         if not intermediate_path.is_file() or intermediate_path.stat().st_size == 0:
             candidates = list(root.glob("*.sl1")) + list(root.glob("*.sl1s"))
             if len(candidates) == 1:
                 intermediate_path = candidates[0]
             else:
-                raise EngineError("PrusaSlicer did not produce the expected SLA archive from the review 3MF.")
+                raise EngineError("PrusaSlicer did not produce the expected SLA archive from the retained recipe.")
 
         conversion = _run(
             [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
             timeout=uvtools_timeout,
         )
-        if conversion.returncode != 0 or not native_path.is_file() or native_path.stat().st_size == 0:
-            raise EngineError(f"UVtools conversion failed: {conversion.stdout[-2000:]}")
+        _require_uvtools_status(conversion, "conversion")
+        if not native_path.is_file() or native_path.stat().st_size == 0:
+            raise EngineError("Pinned UVtools reported normal completion but produced no native artifact.")
 
-        inspection = _run([uvtools_cmd, "print-issues", str(native_path)], timeout=uvtools_timeout)
-        if inspection.returncode != 0:
-            raise EngineError(f"UVtools issue inspection failed: {inspection.stdout[-2000:]}")
+        inspection = _run(
+            [uvtools_cmd, "print-issues", str(native_path), "--no-progress"],
+            timeout=uvtools_timeout,
+        )
+        _require_uvtools_status(inspection, "issue inspection")
         issue_text = inspection.stdout[-12000:]
         issues = parse_uvtools_issues(issue_text)
         if reject_critical and critical_issue_count(issues) > 0:
             raise EngineError("UVtools found critical resin-print issues; human review/correction is required.")
 
         project_bytes = project_path.read_bytes()
+        effective_config = effective_config_path.read_bytes()
         intermediate = intermediate_path.read_bytes()
         native = native_path.read_bytes()
         return NativeArtifact(
@@ -275,7 +338,17 @@ def slice_native(
             resin_profile=resin.id,
             quality_profile=quality.id,
             orientation=orientation,
+            effective_config_bytes=effective_config,
+            effective_config_filename=f"{safe_stem}-workpiece-effective.ini",
+            effective_config_sha256=_sha(effective_config),
         )
+
+
+def _require_effective_config(artifact: NativeArtifact) -> None:
+    if not artifact.effective_config_bytes or not artifact.effective_config_filename:
+        raise EngineError("Native artifact is missing its retained effective resin configuration.")
+    if artifact.effective_config_sha256 != _sha(artifact.effective_config_bytes):
+        raise EngineError("Native artifact effective configuration hash does not match its bytes.")
 
 
 def artifact_manifest(
@@ -285,13 +358,20 @@ def artifact_manifest(
     authority: str,
     execution_environment: dict[str, object] | None = None,
 ) -> dict:
+    _require_effective_config(artifact)
     manifest = {
-        "schema": "workpiece-resin-bundle-v1",
+        "schema": "workpiece-resin-bundle-v2",
         "authority": authority,
-        "provenance_chain": ["source_stl", "review_3mf", "intermediate_sl1", "printer_native"],
+        "provenance_chain": [
+            "source_stl",
+            "review_3mf",
+            "effective_config",
+            "intermediate_sl1",
+            "printer_native",
+        ],
         "engine": {
             "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT},
-            "uvtools": {"version": UVTOOLS_VERSION},
+            "uvtools": {"version": UVTOOLS_VERSION, "normal_command_exit": UVTOOLS_SUCCESS_EXIT},
         },
         "profiles": {
             "printer": artifact.printer_profile,
@@ -306,14 +386,22 @@ def artifact_manifest(
         "files": {
             "source_stl": {"name": source_filename, "sha256": artifact.source_sha256},
             "review_3mf": {"name": artifact.project_filename, "sha256": artifact.project_sha256},
+            "effective_config": {
+                "name": artifact.effective_config_filename,
+                "sha256": artifact.effective_config_sha256,
+            },
             "intermediate_sl1": {"name": artifact.intermediate_filename, "sha256": artifact.intermediate_sha256},
             "printer_native": {"name": artifact.filename, "sha256": artifact.native_sha256},
             "uvtools_issues": {"name": "uvtools-issues.txt"},
         },
         "issues": artifact.issue_summary,
+        "recipe_rule": (
+            "Pinned PrusaSlicer CLI 2.9.6 does not embed print configuration in --export-3mf output; "
+            "the review 3MF and effective config are therefore one indivisible retained recipe."
+        ),
         "review_rule": (
-            "The CTB is valid only for this exact review 3MF hash. If the 3MF is edited, "
-            "do not print the bundled CTB; regenerate the bundle from the revised project."
+            "The printer-native file is valid only for these exact review 3MF and effective-config hashes. "
+            "If either is edited, do not print the bundled native file; regenerate the artifact chain."
         ),
     }
     if execution_environment is not None:
@@ -342,6 +430,7 @@ def build_review_bundle(
     authority: str,
     execution_environment: dict[str, object] | None = None,
 ) -> tuple[bytes, str]:
+    _require_effective_config(artifact)
     safe_stem = _safe_stem(original_name)
     source_filename = f"{safe_stem}-source.stl"
     manifest = artifact_manifest(
@@ -353,10 +442,8 @@ def build_review_bundle(
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         _zip_write(zf, source_filename, source)
-        # 3MF and SL1 are already ZIP archives, and CTB carries its own compressed
-        # layer payloads. Re-deflating them wastes CPU while preserving no useful
-        # information, so store their exact bytes directly in the review bundle.
         _zip_write(zf, artifact.project_filename, artifact.project_bytes, compress_type=zipfile.ZIP_STORED)
+        _zip_write(zf, artifact.effective_config_filename, artifact.effective_config_bytes)
         _zip_write(zf, artifact.intermediate_filename, artifact.intermediate_bytes, compress_type=zipfile.ZIP_STORED)
         _zip_write(zf, artifact.filename, artifact.bytes, compress_type=zipfile.ZIP_STORED)
         _zip_write(zf, "uvtools-issues.txt", artifact.issue_text.encode("utf-8", errors="replace"))
@@ -369,10 +456,16 @@ def compact_metadata(
     *,
     execution_environment: dict[str, object] | None = None,
 ) -> str:
+    _require_effective_config(artifact)
     payload = {
-        "engine": {"prusaslicer": PRUSA_SLICER_VERSION, "uvtools": UVTOOLS_VERSION},
+        "engine": {
+            "prusaslicer": PRUSA_SLICER_VERSION,
+            "uvtools": UVTOOLS_VERSION,
+            "uvtools_normal_command_exit": UVTOOLS_SUCCESS_EXIT,
+        },
         "source_sha256": artifact.source_sha256,
         "project_sha256": artifact.project_sha256,
+        "effective_config_sha256": artifact.effective_config_sha256,
         "intermediate_sha256": artifact.intermediate_sha256,
         "native_sha256": artifact.native_sha256,
         "printer_profile": artifact.printer_profile,

@@ -1,5 +1,7 @@
+import hashlib
 import io
 import json
+import math
 import zipfile
 from pathlib import Path
 
@@ -22,34 +24,53 @@ def profile(pid, kind, path, **metadata):
     return Profile(pid, kind, pid, True, True, Path(path), {"id": pid, **metadata})
 
 
-def test_prusa_project_command_loads_locked_profiles_and_explicit_orientation():
+def test_prusa_project_command_saves_effective_config_centers_and_orients_recipe():
     command = build_prusa_project_command(
         "/opt/prusa",
         Path("/tmp/in.stl"),
         Path("/tmp/review.3mf"),
-        profile("p", "printer", "/profiles/p.ini"),
+        Path("/tmp/effective.ini"),
+        profile(
+            "p",
+            "printer",
+            "/profiles/p.ini",
+            display_width_mm=82.62,
+            display_height_mm=130.56,
+        ),
         profile("r", "resin", "/profiles/r.ini"),
         profile("q", "quality", "/profiles/q.ini"),
         Orientation(10, -20, 35),
     )
     assert command[:7] == ["/opt/prusa", "--load", "/profiles/p.ini", "--load", "/profiles/r.ini", "--load", "/profiles/q.ini"]
-    assert ["--rotate-x", "10"] == command[7:9]
+    assert command[7:9] == ["--center", "41.31,65.28"]
+    assert command[9:11] == ["--rotate-x", "10"]
+    assert ["--save", "/tmp/effective.ini"] == command[15:17]
     assert "--export-3mf" in command
     assert command[-1] == "/tmp/in.stl"
 
 
-def test_prusa_slice_command_uses_exact_project_without_profile_reload():
+def test_prusa_slice_command_uses_exact_recipe_pair_without_rearrangement():
     command = build_prusa_slice_command(
-        "/opt/prusa", Path("/tmp/review.3mf"), Path("/tmp/out.sl1")
+        "/opt/prusa",
+        Path("/tmp/review.3mf"),
+        Path("/tmp/effective.ini"),
+        Path("/tmp/out.sl1"),
     )
     assert command == [
-        "/opt/prusa", "--export-sla", "--output", "/tmp/out.sl1", "/tmp/review.3mf"
+        "/opt/prusa",
+        "--load", "/tmp/effective.ini",
+        "--dont-arrange",
+        "--export-sla",
+        "--output", "/tmp/out.sl1",
+        "/tmp/review.3mf",
     ]
-    assert "--load" not in command
     assert "--rotate" not in command
+    assert "--rotate-x" not in command
+    assert "--rotate-y" not in command
 
 
 def _artifact() -> NativeArtifact:
+    effective = b"printer_technology = SLA\n"
     return NativeArtifact(
         project_bytes=b"project",
         project_filename="part-workpiece-review.3mf",
@@ -68,10 +89,13 @@ def _artifact() -> NativeArtifact:
         resin_profile="elegoo-water-washable-grey",
         quality_profile="balanced-0p05-medium",
         orientation=Orientation(15, 0, 25),
+        effective_config_bytes=effective,
+        effective_config_filename="part-workpiece-effective.ini",
+        effective_config_sha256=hashlib.sha256(effective).hexdigest(),
     )
 
 
-def test_review_bundle_contains_provenance_artifacts_manifest_and_runtime_in_one_pass():
+def test_review_bundle_contains_complete_recipe_provenance_and_runtime_in_one_pass():
     execution_environment = {
         "toolchain_image_ref": "ghcr.io/workpiece-gr/resin-slicer-toolchain@sha256:" + "a" * 64,
         "immutable": True,
@@ -89,6 +113,7 @@ def test_review_bundle_contains_provenance_artifacts_manifest_and_runtime_in_one
         assert names == {
             "part-source.stl",
             "part-workpiece-review.3mf",
+            "part-workpiece-effective.ini",
             "part-workpiece-intermediate.sl1",
             "part-workpiece.ctb",
             "uvtools-issues.txt",
@@ -98,18 +123,40 @@ def test_review_bundle_contains_provenance_artifacts_manifest_and_runtime_in_one
         assert zf.getinfo("part-workpiece-review.3mf").compress_type == zipfile.ZIP_STORED
         assert zf.getinfo("part-workpiece-intermediate.sl1").compress_type == zipfile.ZIP_STORED
         assert zf.getinfo("part-workpiece.ctb").compress_type == zipfile.ZIP_STORED
+    assert manifest["schema"] == "workpiece-resin-bundle-v2"
     assert manifest["provenance_chain"] == [
-        "source_stl", "review_3mf", "intermediate_sl1", "printer_native"
+        "source_stl", "review_3mf", "effective_config", "intermediate_sl1", "printer_native"
     ]
     assert manifest["files"]["review_3mf"]["sha256"] == "project-sha"
+    assert manifest["files"]["effective_config"]["sha256"] == _artifact().effective_config_sha256
     assert manifest["files"]["printer_native"]["sha256"] == "ctb-sha"
     assert manifest["execution_environment"] == execution_environment
-    assert "If the 3MF is edited" in manifest["review_rule"]
+    assert "indivisible retained recipe" in manifest["recipe_rule"]
+    assert "effective-config" in manifest["review_rule"]
 
 
-def test_orientation_is_bounded():
+def test_bundle_rejects_missing_or_mismatched_effective_config():
+    artifact = _artifact()
+    broken = NativeArtifact(**{
+        **artifact.__dict__,
+        "effective_config_sha256": "0" * 64,
+    })
+    with pytest.raises(EngineError, match="configuration hash"):
+        build_review_bundle(
+            b"stl",
+            original_name="part.stl",
+            artifact=broken,
+            authority="acceptance-candidate-only",
+        )
+
+
+def test_orientation_is_bounded_and_finite():
     with pytest.raises(EngineError):
         Orientation(361, 0, 0).validate()
+    with pytest.raises(EngineError):
+        Orientation(math.inf, 0, 0).validate()
+    with pytest.raises(EngineError):
+        Orientation(True, 0, 0).validate()
 
 
 def test_issue_parser_extracts_critical_categories():

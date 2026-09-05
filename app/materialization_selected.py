@@ -37,6 +37,7 @@ class SelectedPlateMaterializationSpec:
     source_sha256: str
     selected_orientation_deg: tuple[float, float, float]
     selected_review_3mf_sha256: str
+    selected_effective_config_sha256: str
     selected_intermediate_sl1_sha256: str
     selected_printer_native_sha256: str
     plate_spec: PlateMaterializationSpec
@@ -47,6 +48,7 @@ class SelectedMaterializedPlateEvidence:
     source_sha256: str
     selected_orientation_deg: tuple[float, float, float]
     selected_review_3mf_sha256: str
+    selected_effective_config_sha256: str
     selected_intermediate_sl1_sha256: str
     selected_printer_native_sha256: str
     materialized_plate: MaterializedPlateEvidence
@@ -71,6 +73,9 @@ def prepare_selected_plate_materialization(
     review_hash = _sha256(
         "selected_review_3mf_sha256", selected_plan.review_project_sha256
     )
+    config_hash = _sha256(
+        "selected_effective_config_sha256", selected_plan.effective_config_sha256
+    )
     intermediate_hash = _sha256(
         "selected_intermediate_sl1_sha256", selected_plan.intermediate_sha256
     )
@@ -88,6 +93,7 @@ def prepare_selected_plate_materialization(
         source_sha256=source_hash,
         selected_orientation_deg=selected_plan.orientation_deg,
         selected_review_3mf_sha256=review_hash,
+        selected_effective_config_sha256=config_hash,
         selected_intermediate_sl1_sha256=intermediate_hash,
         selected_printer_native_sha256=native_hash,
         plate_spec=plate_spec,
@@ -111,6 +117,9 @@ def finalize_selected_materialized_plate(
         selected_orientation_deg=spec.selected_orientation_deg,
         selected_review_3mf_sha256=_sha256(
             "selected_review_3mf_sha256", spec.selected_review_3mf_sha256
+        ),
+        selected_effective_config_sha256=_sha256(
+            "selected_effective_config_sha256", spec.selected_effective_config_sha256
         ),
         selected_intermediate_sl1_sha256=_sha256(
             "selected_intermediate_sl1_sha256", spec.selected_intermediate_sl1_sha256
@@ -137,6 +146,10 @@ def selected_materialized_plate_manifest(
             "review_3mf_sha256": _sha256(
                 "selected_review_3mf_sha256", evidence.selected_review_3mf_sha256
             ),
+            "effective_config_sha256": _sha256(
+                "selected_effective_config_sha256",
+                evidence.selected_effective_config_sha256,
+            ),
             "intermediate_sl1_sha256": _sha256(
                 "selected_intermediate_sl1_sha256",
                 evidence.selected_intermediate_sl1_sha256,
@@ -148,7 +161,7 @@ def selected_materialized_plate_manifest(
         },
         "materialized_plate": materialized_plate_manifest(evidence.materialized_plate),
         "provenance_rule": (
-            "This per-plate 3MF output was materialized through the selected-orientation path from the exact source-bound sliced winner; "
+            "This per-plate 3MF output was materialized through the selected-orientation path from the exact source-bound sliced winner and its retained effective config; "
             "its final supported/padded envelopes are separately re-extracted and bound to the exact plate 3MF hash."
         ),
     }

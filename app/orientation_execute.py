@@ -24,6 +24,7 @@ class SlicedMeasurements:
 
     source_sha256: str
     review_project_sha256: str
+    effective_config_sha256: str
     intermediate_sha256: str
     native_sha256: str
     max_layer_area_mm2: float
@@ -101,6 +102,11 @@ def execute_sliced_finalists(
             artifact.project_sha256,
         )
         _assert_equal(
+            "measurement effective config SHA-256",
+            measurements.effective_config_sha256,
+            artifact.effective_config_sha256,
+        )
+        _assert_equal(
             "measurement intermediate SL1 SHA-256",
             measurements.intermediate_sha256,
             artifact.intermediate_sha256,
@@ -117,6 +123,7 @@ def execute_sliced_finalists(
                 spec=spec,
                 source_sha256=source_hash,
                 review_project_sha256=artifact.project_sha256,
+                effective_config_sha256=artifact.effective_config_sha256,
                 intermediate_sha256=artifact.intermediate_sha256,
                 native_sha256=artifact.native_sha256,
                 max_layer_area_mm2=measurements.max_layer_area_mm2,
