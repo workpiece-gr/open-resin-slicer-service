@@ -5,12 +5,12 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 
-ORIENTATION_DECISION_SCHEMA = "workpiece-resin-orientation-decision-v1"
+ORIENTATION_DECISION_SCHEMA = "workpiece-resin-orientation-decision-v2"
 METRIC_SOURCES = {"geometry-proxy", "sliced-validation"}
 DEFAULT_WEIGHTS = {
     "max_layer_area_mm2": 0.40,
-    "support_volume_mm3": 0.25,
-    "support_contact_area_mm2": 0.20,
+    "material_volume_mm3": 0.25,
+    "footprint_area_mm2": 0.20,
     "z_height_mm": 0.15,
 }
 
@@ -53,9 +53,17 @@ def _canonical_angle(value: float) -> float:
 
 @dataclass(frozen=True)
 class OrientationMetrics:
+    """Comparable orientation metrics.
+
+    For sliced-validation these values must come from the exact retained printer-native
+    artifact: maximum illuminated layer area, total cured material volume, whole-print
+    XY footprint area, and print Z height. Proxy callers may use estimates only when
+    sliced validation is not required.
+    """
+
     max_layer_area_mm2: float
-    support_volume_mm3: float
-    support_contact_area_mm2: float
+    material_volume_mm3: float
+    footprint_area_mm2: float
     z_height_mm: float
     unresolved_islands: int = 0
     unresolved_suction_cups: int = 0
@@ -64,8 +72,8 @@ class OrientationMetrics:
 
     def validate(self) -> "OrientationMetrics":
         _nonnegative("max_layer_area_mm2", self.max_layer_area_mm2)
-        _nonnegative("support_volume_mm3", self.support_volume_mm3)
-        _nonnegative("support_contact_area_mm2", self.support_contact_area_mm2)
+        _nonnegative("material_volume_mm3", self.material_volume_mm3)
+        _nonnegative("footprint_area_mm2", self.footprint_area_mm2)
         _nonnegative("z_height_mm", self.z_height_mm)
         _count("unresolved_islands", self.unresolved_islands)
         _count("unresolved_suction_cups", self.unresolved_suction_cups)
@@ -260,8 +268,8 @@ def orientation_decision_manifest(
             "metric_source": metrics.source,
             "metrics": {
                 "max_layer_area_mm2": float(metrics.max_layer_area_mm2),
-                "support_volume_mm3": float(metrics.support_volume_mm3),
-                "support_contact_area_mm2": float(metrics.support_contact_area_mm2),
+                "material_volume_mm3": float(metrics.material_volume_mm3),
+                "footprint_area_mm2": float(metrics.footprint_area_mm2),
                 "z_height_mm": float(metrics.z_height_mm),
                 "unresolved_islands": metrics.unresolved_islands,
                 "unresolved_suction_cups": metrics.unresolved_suction_cups,
@@ -286,13 +294,14 @@ def orientation_decision_manifest(
         "scoring": {
             "normalization": "min-max across unblocked candidates",
             "weights": selected_weights,
+            "metric_contract": "exact retained native artifact for sliced-validation",
             "tie_break": "lowest score, then least total rotation, then canonical XYZ angles",
         },
         "selected": selected_payload,
         "candidates": [candidate_payload(item) for item in decision.ranked],
         "review_rule": (
             "This decision is an orientation proposal, not production authorization. "
-            "Production requires sliced-validation metrics for the selected orientation, "
-            "inspection of the exact retained 3MF/CTB chain, and physical acceptance of the calibrated tuple."
+            "Sliced-validation metrics must be reproducibly extracted from the exact retained printer-native artifact; "
+            "production additionally requires retained artifact inspection and physical acceptance of the calibrated tuple."
         ),
     }

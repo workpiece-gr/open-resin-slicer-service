@@ -20,15 +20,15 @@ class SlicedFinalistExecutionError(ValueError):
 
 @dataclass(frozen=True)
 class SlicedMeasurements:
-    """Measurements extracted from the exact sliced artifacts for one finalist."""
+    """Metrics extracted from the exact retained printer-native artifact."""
 
     source_sha256: str
     review_project_sha256: str
     intermediate_sha256: str
     native_sha256: str
     max_layer_area_mm2: float
-    support_volume_mm3: float
-    support_contact_area_mm2: float
+    material_volume_mm3: float
+    footprint_area_mm2: float
     z_height_mm: float
 
 
@@ -66,11 +66,12 @@ def execute_sliced_finalists(
     quality_profile: str,
     execute_finalist: Callable[[OrientationSpec], FinalistSliceResult],
 ) -> SlicedFinalistExecution:
-    """Execute exactly the proxy finalists and validate source/artifact/measurement binding.
+    """Execute exactly the proxy finalists and validate artifact-native measurement binding.
 
-    The callback is deliberately injected so this contract is testable without PrusaSlicer.
-    A production adapter must return NativeArtifact plus measurements extracted from that
-    artifact chain; proxy estimates are never accepted here.
+    The callback is injected so this contract remains unit-testable without PrusaSlicer.
+    A real adapter must return the NativeArtifact plus metrics extracted from its exact
+    retained printer-native output; hidden Prusa state and proxy estimates are rejected
+    as measurement authority by contract.
     """
     source_hash = hashlib.sha256(source_stl).hexdigest()
     if source_hash != proxy_plan.source_sha256:
@@ -125,8 +126,8 @@ def execute_sliced_finalists(
                 intermediate_sha256=artifact.intermediate_sha256,
                 native_sha256=artifact.native_sha256,
                 max_layer_area_mm2=measurements.max_layer_area_mm2,
-                support_volume_mm3=measurements.support_volume_mm3,
-                support_contact_area_mm2=measurements.support_contact_area_mm2,
+                material_volume_mm3=measurements.material_volume_mm3,
+                footprint_area_mm2=measurements.footprint_area_mm2,
                 z_height_mm=measurements.z_height_mm,
                 unresolved_islands=int(issues.get("islands", 0)),
                 unresolved_suction_cups=int(issues.get("suction_cups", 0)),

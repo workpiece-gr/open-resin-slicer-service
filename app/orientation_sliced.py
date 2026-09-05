@@ -14,7 +14,7 @@ from .orientation_candidates import OrientationSpec
 from .orientation_screen import ProxyScreeningDecision
 
 
-SLICED_ORIENTATION_SCHEMA = "workpiece-resin-orientation-sliced-validation-v1"
+SLICED_ORIENTATION_SCHEMA = "workpiece-resin-orientation-sliced-validation-v2"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -33,7 +33,7 @@ def _sha256(name: str, value: str) -> str:
 
 @dataclass(frozen=True)
 class SlicedFinalistEvidence:
-    """Authoritative sliced measurements for one proxy-screened orientation finalist."""
+    """Native-artifact measurements for one proxy-screened orientation finalist."""
 
     spec: OrientationSpec
     source_sha256: str
@@ -41,8 +41,8 @@ class SlicedFinalistEvidence:
     intermediate_sha256: str
     native_sha256: str
     max_layer_area_mm2: float
-    support_volume_mm3: float
-    support_contact_area_mm2: float
+    material_volume_mm3: float
+    footprint_area_mm2: float
     z_height_mm: float
     unresolved_islands: int = 0
     unresolved_suction_cups: int = 0
@@ -65,8 +65,8 @@ class SlicedFinalistEvidence:
     def metrics(self) -> OrientationMetrics:
         return OrientationMetrics(
             max_layer_area_mm2=self.max_layer_area_mm2,
-            support_volume_mm3=self.support_volume_mm3,
-            support_contact_area_mm2=self.support_contact_area_mm2,
+            material_volume_mm3=self.material_volume_mm3,
+            footprint_area_mm2=self.footprint_area_mm2,
             z_height_mm=self.z_height_mm,
             unresolved_islands=self.unresolved_islands,
             unresolved_suction_cups=self.unresolved_suction_cups,
@@ -168,10 +168,10 @@ def sliced_orientation_manifest(
             {
                 "orientation_deg": {"x": key[0], "y": key[1], "z": key[2]},
                 "artifacts": item.artifact_record(),
-                "sliced_metrics": {
+                "native_metrics": {
                     "max_layer_area_mm2": float(item.max_layer_area_mm2),
-                    "support_volume_mm3": float(item.support_volume_mm3),
-                    "support_contact_area_mm2": float(item.support_contact_area_mm2),
+                    "material_volume_mm3": float(item.material_volume_mm3),
+                    "footprint_area_mm2": float(item.footprint_area_mm2),
                     "z_height_mm": float(item.z_height_mm),
                     "unresolved_islands": item.unresolved_islands,
                     "unresolved_suction_cups": item.unresolved_suction_cups,
@@ -193,12 +193,13 @@ def sliced_orientation_manifest(
         "automatic_production_authority": False,
         "source_sha256": _sha256("source_sha256", validation.source_sha256),
         "finalist_coverage": "exact",
+        "metric_authority": "exact-retained-printer-native-artifact",
         "decision": orientation_decision_manifest(validation.decision, weights=weights),
         "selected_artifacts": selected.artifact_record() if selected else None,
         "evidence": evidence_payload,
         "review_rule": (
             "Only proxy finalists derived from the same exact source STL and carrying exact retained 3MF/SL1/native hashes may enter sliced ranking. "
-            "This sliced decision still does not authorize production; the selected retained artifacts, plate materialization, "
-            "printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
+            "Soft ranking metrics are derived from the exact retained printer-native artifact, not hidden slicer state or geometry proxies. "
+            "This decision still does not authorize production; plate materialization, printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
         ),
     }

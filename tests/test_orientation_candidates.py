@@ -61,8 +61,8 @@ def test_spec_attaches_metric_provenance_without_changing_rotation():
     spec = OrientationSpec(-30, 15)
     metrics = OrientationMetrics(
         max_layer_area_mm2=100,
-        support_volume_mm3=20,
-        support_contact_area_mm2=5,
+        material_volume_mm3=2000,
+        footprint_area_mm2=500,
         z_height_mm=40,
         source="geometry-proxy",
     )

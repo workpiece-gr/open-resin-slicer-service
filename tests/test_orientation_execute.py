@@ -73,17 +73,12 @@ def _result(
         source_sha256=source_sha,
         intermediate_sha256=intermediate_sha,
         native_sha256=native_sha,
-        issue_summary={
-            "islands": islands,
-            "suction_cups": 0,
-            "resin_traps": 0,
-        },
+        issue_summary={"islands": islands, "suction_cups": 0, "resin_traps": 0},
         issue_text="",
         printer_profile=printer_profile,
         resin_profile="elegoo-water-washable-grey",
         quality_profile="balanced-0p05-medium",
-        orientation=orientation_override
-        or Orientation(spec.x_deg, spec.y_deg, spec.z_deg),
+        orientation=orientation_override or Orientation(spec.x_deg, spec.y_deg, spec.z_deg),
     )
     measurements = SlicedMeasurements(
         source_sha256=source_sha,
@@ -91,8 +86,8 @@ def _result(
         intermediate_sha256=intermediate_sha,
         native_sha256=native_sha,
         max_layer_area_mm2=180 if token == "b" else 220,
-        support_volume_mm3=70 if token == "b" else 100,
-        support_contact_area_mm2=25 if token == "b" else 40,
+        material_volume_mm3=1800 if token == "b" else 2100,
+        footprint_area_mm2=420 if token == "b" else 500,
         z_height_mm=29 if token == "b" else 24,
     )
     return FinalistSliceResult(artifact=artifact, measurements=measurements)
@@ -109,16 +104,17 @@ def _execute(plan: ProxyOrientationPlan, callback):
     )
 
 
-def test_executes_exact_proxy_finalists_and_builds_sliced_validation():
+def test_executes_exact_proxy_finalists_and_builds_native_metric_validation():
     plan = _plan()
     execution = _execute(plan, lambda spec: _result(spec))
-
     expected = [item.candidate.spec.canonical_key for item in plan.screening.finalists]
     actual = [item.artifact.orientation for item in execution.results]
     assert [(item.x % 360, item.y % 360, item.z % 360) for item in actual] == expected
     assert execution.validation.source_sha256 == SOURCE_SHA
     assert execution.validation.selected_evidence is not None
     assert execution.validation.selected_evidence.metrics.source == "sliced-validation"
+    assert execution.validation.selected_evidence.material_volume_mm3 > 0
+    assert execution.validation.selected_evidence.footprint_area_mm2 > 0
 
 
 def test_uvtools_critical_issue_blocks_only_the_affected_finalist():
@@ -157,7 +153,6 @@ def test_rejects_slicer_orientation_or_profile_mismatch():
 
     with pytest.raises(SlicedFinalistExecutionError, match="orientation"):
         _execute(plan, bad_orientation)
-
     with pytest.raises(SlicedFinalistExecutionError, match="printer profile"):
         _execute(plan, lambda spec: _result(spec, printer_profile="wrong-printer"))
 
@@ -165,7 +160,4 @@ def test_rejects_slicer_orientation_or_profile_mismatch():
 def test_rejects_measurements_not_bound_to_exact_artifact_hashes():
     plan = _plan()
     with pytest.raises(SlicedFinalistExecutionError, match="review 3MF"):
-        _execute(
-            plan,
-            lambda spec: _result(spec, measurement_project_sha="9" * 64),
-        )
+        _execute(plan, lambda spec: _result(spec, measurement_project_sha="9" * 64))

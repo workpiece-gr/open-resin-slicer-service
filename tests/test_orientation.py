@@ -17,8 +17,8 @@ def _candidate(
     z=0,
     *,
     area=100,
-    support=100,
-    contact=20,
+    material=1000,
+    footprint=400,
     height=50,
     islands=0,
     cups=0,
@@ -31,8 +31,8 @@ def _candidate(
         z_deg=z,
         metrics=OrientationMetrics(
             max_layer_area_mm2=area,
-            support_volume_mm3=support,
-            support_contact_area_mm2=contact,
+            material_volume_mm3=material,
+            footprint_area_mm2=footprint,
             z_height_mm=height,
             unresolved_islands=islands,
             unresolved_suction_cups=cups,
@@ -51,10 +51,19 @@ def test_lower_peel_cross_section_wins_when_other_metrics_match():
     assert decision.selected.candidate.canonical_key == (20.0, 0.0, 0.0)
 
 
+def test_lower_material_and_footprint_burden_are_soft_objectives():
+    decision = rank_orientation_candidates([
+        _candidate(x=10, material=2000, footprint=600),
+        _candidate(x=20, material=1200, footprint=300),
+    ])
+    assert decision.selected is not None
+    assert decision.selected.candidate.canonical_key == (20.0, 0.0, 0.0)
+
+
 def test_critical_resin_failures_block_candidate_before_soft_scoring():
     decision = rank_orientation_candidates([
-        _candidate(x=10, area=20, support=20, contact=5, height=20, cups=1),
-        _candidate(x=30, area=100, support=100, contact=20, height=50),
+        _candidate(x=10, area=20, material=500, footprint=200, height=20, cups=1),
+        _candidate(x=30, area=100, material=1000, footprint=400, height=50),
     ])
     assert decision.selected is not None
     assert decision.selected.candidate.canonical_key == (30.0, 0.0, 0.0)
@@ -116,27 +125,28 @@ def test_invalid_metrics_and_weights_fail_closed():
     with pytest.raises(OrientationPlanError, match="sum to 1.0"):
         rank_orientation_candidates([_candidate()], weights={
             "max_layer_area_mm2": 1,
-            "support_volume_mm3": 1,
-            "support_contact_area_mm2": 0,
+            "material_volume_mm3": 1,
+            "footprint_area_mm2": 0,
             "z_height_mm": 0,
         })
 
 
-def test_manifest_preserves_metric_source_score_breakdown_and_review_boundary():
+def test_manifest_preserves_native_metric_contract_and_review_boundary():
     decision = rank_orientation_candidates([
         _candidate(x=15, area=120, source="sliced-validation"),
         _candidate(x=30, area=80, source="sliced-validation"),
     ], require_sliced_validation=True)
     manifest = orientation_decision_manifest(decision)
-    assert manifest["schema"] == "workpiece-resin-orientation-decision-v1"
+    assert manifest["schema"] == "workpiece-resin-orientation-decision-v2"
     assert manifest["automatic_production_authority"] is False
     assert manifest["require_sliced_validation"] is True
     assert manifest["selected"]["orientation_deg"] == {"x": 30.0, "y": 0.0, "z": 0.0}
     assert manifest["selected"]["metric_source"] == "sliced-validation"
     assert set(manifest["selected"]["score_components"]) == {
         "max_layer_area_mm2",
-        "support_volume_mm3",
-        "support_contact_area_mm2",
+        "material_volume_mm3",
+        "footprint_area_mm2",
         "z_height_mm",
     }
+    assert manifest["scoring"]["metric_contract"] == "exact retained native artifact for sliced-validation"
     assert "not production authorization" in manifest["review_rule"].lower()

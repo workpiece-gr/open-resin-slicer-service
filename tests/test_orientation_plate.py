@@ -54,8 +54,8 @@ def _sliced_validation(*, block_all: bool = False):
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
             max_layer_area_mm2=220,
-            support_volume_mm3=100,
-            support_contact_area_mm2=40,
+            material_volume_mm3=2100,
+            footprint_area_mm2=500,
             z_height_mm=24,
             unresolved_islands=1 if block_all else 0,
         ),
@@ -66,8 +66,8 @@ def _sliced_validation(*, block_all: bool = False):
             intermediate_sha256=INTERMEDIATE_SHA,
             native_sha256=NATIVE_SHA,
             max_layer_area_mm2=180,
-            support_volume_mm3=70,
-            support_contact_area_mm2=25,
+            material_volume_mm3=1800,
+            footprint_area_mm2=420,
             z_height_mm=29,
             unresolved_resin_traps=1 if block_all else 0,
         ),
@@ -90,7 +90,6 @@ def test_selected_sliced_supported_envelope_drives_profile_backed_plate_plan():
         pretranslation_envelope=envelope,
         quantity=3,
     )
-
     assert result.source_sha256 == SOURCE_SHA
     assert result.review_project_sha256 == PROJECT_SHA
     assert result.intermediate_sha256 == INTERMEDIATE_SHA
@@ -136,7 +135,6 @@ def test_manifest_binds_upstream_source_and_sliced_artifacts_and_keeps_mars2_non
         quantity=3,
     )
     manifest = orientation_plate_plan_manifest(result)
-
     assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v1"
     assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["selected_review_3mf_sha256"] == PROJECT_SHA
