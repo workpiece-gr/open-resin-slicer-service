@@ -52,6 +52,8 @@ def _result(
     spec: OrientationSpec,
     *,
     islands: int = 0,
+    touching_bounds: int = 0,
+    empty_layers: int = 0,
     source_sha: str = SOURCE_SHA,
     orientation_override: Orientation | None = None,
     measurement_project_sha: str | None = None,
@@ -73,7 +75,13 @@ def _result(
         source_sha256=source_sha,
         intermediate_sha256=intermediate_sha,
         native_sha256=native_sha,
-        issue_summary={"islands": islands, "suction_cups": 0, "resin_traps": 0},
+        issue_summary={
+            "islands": islands,
+            "suction_cups": 0,
+            "resin_traps": 0,
+            "touching_bounds": touching_bounds,
+            "empty_layers": empty_layers,
+        },
         issue_text="",
         printer_profile=printer_profile,
         resin_profile="elegoo-water-washable-grey",
@@ -125,6 +133,28 @@ def test_uvtools_critical_issue_blocks_only_the_affected_finalist():
         return _result(spec, islands=1 if spec.canonical_key == blocked_key else 0)
 
     execution = _execute(plan, callback)
+    assert execution.validation.selected_evidence is not None
+    assert execution.validation.selected_evidence.canonical_key != blocked_key
+
+
+@pytest.mark.parametrize(
+    ("issue_name", "expected_reason"),
+    (("touching_bounds", "touching-bounds"), ("empty_layers", "empty-layers")),
+)
+def test_all_engine_critical_native_issues_block_orientation(issue_name, expected_reason):
+    plan = _plan()
+    blocked_key = plan.screening.finalists[0].candidate.spec.canonical_key
+
+    def callback(spec: OrientationSpec):
+        kwargs = {issue_name: 1} if spec.canonical_key == blocked_key else {}
+        return _result(spec, **kwargs)
+
+    execution = _execute(plan, callback)
+    blocked = next(
+        item for item in execution.validation.decision.ranked
+        if item.candidate.canonical_key == blocked_key
+    )
+    assert expected_reason in blocked.blocked_reasons
     assert execution.validation.selected_evidence is not None
     assert execution.validation.selected_evidence.canonical_key != blocked_key
 

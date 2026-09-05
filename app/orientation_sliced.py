@@ -47,6 +47,8 @@ class SlicedFinalistEvidence:
     unresolved_islands: int = 0
     unresolved_suction_cups: int = 0
     unresolved_resin_traps: int = 0
+    unresolved_touching_bounds: int = 0
+    unresolved_empty_layers: int = 0
 
     @property
     def canonical_key(self) -> tuple[float, float, float]:
@@ -71,6 +73,8 @@ class SlicedFinalistEvidence:
             unresolved_islands=self.unresolved_islands,
             unresolved_suction_cups=self.unresolved_suction_cups,
             unresolved_resin_traps=self.unresolved_resin_traps,
+            unresolved_touching_bounds=self.unresolved_touching_bounds,
+            unresolved_empty_layers=self.unresolved_empty_layers,
             source="sliced-validation",
         )
 
@@ -176,6 +180,8 @@ def sliced_orientation_manifest(
                     "unresolved_islands": item.unresolved_islands,
                     "unresolved_suction_cups": item.unresolved_suction_cups,
                     "unresolved_resin_traps": item.unresolved_resin_traps,
+                    "unresolved_touching_bounds": item.unresolved_touching_bounds,
+                    "unresolved_empty_layers": item.unresolved_empty_layers,
                 },
                 "blocked_reasons": list(ranked.blocked_reasons),
                 "score": ranked.score,
@@ -200,6 +206,6 @@ def sliced_orientation_manifest(
         "review_rule": (
             "Only proxy finalists derived from the same exact source STL and carrying exact retained 3MF/SL1/native hashes may enter sliced ranking. "
             "Soft ranking metrics are derived from the exact retained printer-native artifact, not hidden slicer state or geometry proxies. "
-            "This decision still does not authorize production; plate materialization, printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
+            "All engine-critical native issues are hard blockers. This decision still does not authorize production; plate materialization, printer mapping, calibrated resin tuple, and physical print acceptance remain mandatory."
         ),
     }

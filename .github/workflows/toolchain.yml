@@ -3,6 +3,7 @@ name: Resin Toolchain Build
 on:
   push:
     branches:
+      - main
       - chris/mars2-resin-toolchain-split
     paths:
       - Dockerfile.toolchain

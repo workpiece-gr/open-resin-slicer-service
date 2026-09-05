@@ -121,32 +121,56 @@ def _rotate_y(point: Point3, angle: float) -> Point3:
     return (x * c + z * s, y, -x * s + z * c)
 
 
+def _rotate_point_radians(point: Point3, z_angle: float, x_angle: float, y_angle: float) -> Point3:
+    result = _rotate_z(point, z_angle)
+    result = _rotate_x(result, x_angle)
+    return _rotate_y(result, y_angle)
+
+
 def rotate_point_prusa_cli(point: Point3, orientation: OrientationSpec) -> Point3:
     """Mirror pinned PrusaSlicer CLI transform order: Z, then X, then Y."""
     try:
         orientation.validate()
     except OrientationPlanError as exc:
         raise OrientationProxyError(str(exc)) from exc
-    result = _rotate_z(point, math.radians(float(orientation.z_deg)))
-    result = _rotate_x(result, math.radians(float(orientation.x_deg)))
-    return _rotate_y(result, math.radians(float(orientation.y_deg)))
+    return _rotate_point_radians(
+        point,
+        math.radians(float(orientation.z_deg)),
+        math.radians(float(orientation.x_deg)),
+        math.radians(float(orientation.y_deg)),
+    )
 
 
 def _rotate_triangles(triangles: Iterable[Triangle], orientation: OrientationSpec) -> tuple[Triangle, ...]:
+    try:
+        orientation.validate()
+    except OrientationPlanError as exc:
+        raise OrientationProxyError(str(exc)) from exc
+    z_angle = math.radians(float(orientation.z_deg))
+    x_angle = math.radians(float(orientation.x_deg))
+    y_angle = math.radians(float(orientation.y_deg))
     return tuple(
-        tuple(rotate_point_prusa_cli(point, orientation) for point in triangle)  # type: ignore[arg-type]
+        tuple(_rotate_point_radians(point, z_angle, x_angle, y_angle) for point in triangle)  # type: ignore[arg-type]
         for triangle in triangles
     )
 
 
 def _bounds(triangles: tuple[Triangle, ...]) -> tuple[float, float, float, float, float, float]:
-    points = [point for triangle in triangles for point in triangle]
-    if not points:
+    if not triangles:
         raise OrientationProxyError("Proxy geometry contains no triangles.")
-    xs = [point[0] for point in points]
-    ys = [point[1] for point in points]
-    zs = [point[2] for point in points]
-    return min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)
+    first = triangles[0][0]
+    min_x = max_x = first[0]
+    min_y = max_y = first[1]
+    min_z = max_z = first[2]
+    for triangle in triangles:
+        for x, y, z in triangle:
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+            min_y = min(min_y, y)
+            max_y = max(max_y, y)
+            min_z = min(min_z, z)
+            max_z = max(max_z, z)
+    return min_x, max_x, min_y, max_y, min_z, max_z
 
 
 def _triangle_downward_signals(triangle: Triangle, min_z: float) -> tuple[float, float]:
@@ -256,9 +280,6 @@ def _polygon_area(loop: list[Point2]) -> float:
 
 
 def _gross_contour_area(loops: list[list[Point2]]) -> float:
-    # Deliberately conservative for proxy screening: nested hole contours are counted
-    # as illuminated area instead of riskily subtracting them from imperfectly stitched
-    # topology. Final sliced validation remains authoritative.
     return sum(abs(_polygon_area(loop)) for loop in loops)
 
 

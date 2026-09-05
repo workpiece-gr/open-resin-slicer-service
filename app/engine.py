@@ -211,8 +211,6 @@ def slice_native(
         native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
-        # 1) Build the human-review project. It carries model placement/orientation and
-        #    the exact printer/material/quality settings used for subsequent slicing.
         project = _run(
             build_prusa_project_command(
                 prusa_bin, input_path, project_path, printer, resin, quality, orientation
@@ -228,8 +226,6 @@ def slice_native(
             else:
                 raise EngineError("PrusaSlicer did not produce the expected review 3MF project.")
 
-        # 2) Slice the exact retained 3MF, with no second profile load or transform pass.
-        #    This makes the project hash part of the authoritative provenance chain.
         sliced = _run(
             build_prusa_slice_command(prusa_bin, project_path, intermediate_path),
             timeout=slice_timeout,
@@ -243,7 +239,6 @@ def slice_native(
             else:
                 raise EngineError("PrusaSlicer did not produce the expected SLA archive from the review 3MF.")
 
-        # 3) Convert to the exact printer-native file and inspect it.
         conversion = _run(
             [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
             timeout=uvtools_timeout,
@@ -283,8 +278,14 @@ def slice_native(
         )
 
 
-def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authority: str) -> dict:
-    return {
+def artifact_manifest(
+    artifact: NativeArtifact,
+    *,
+    source_filename: str,
+    authority: str,
+    execution_environment: dict[str, object] | None = None,
+) -> dict:
+    manifest = {
         "schema": "workpiece-resin-bundle-v1",
         "authority": authority,
         "provenance_chain": ["source_stl", "review_3mf", "intermediate_sl1", "printer_native"],
@@ -315,31 +316,59 @@ def artifact_manifest(artifact: NativeArtifact, *, source_filename: str, authori
             "do not print the bundled CTB; regenerate the bundle from the revised project."
         ),
     }
+    if execution_environment is not None:
+        manifest["execution_environment"] = dict(execution_environment)
+    return manifest
 
 
-def _zip_write(zf: zipfile.ZipFile, name: str, data: bytes) -> None:
+def _zip_write(
+    zf: zipfile.ZipFile,
+    name: str,
+    data: bytes,
+    *,
+    compress_type: int = zipfile.ZIP_DEFLATED,
+) -> None:
     info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
-    info.compress_type = zipfile.ZIP_DEFLATED
+    info.compress_type = compress_type
     info.external_attr = 0o644 << 16
     zf.writestr(info, data)
 
 
-def build_review_bundle(source: bytes, *, original_name: str, artifact: NativeArtifact, authority: str) -> tuple[bytes, str]:
+def build_review_bundle(
+    source: bytes,
+    *,
+    original_name: str,
+    artifact: NativeArtifact,
+    authority: str,
+    execution_environment: dict[str, object] | None = None,
+) -> tuple[bytes, str]:
     safe_stem = _safe_stem(original_name)
     source_filename = f"{safe_stem}-source.stl"
-    manifest = artifact_manifest(artifact, source_filename=source_filename, authority=authority)
+    manifest = artifact_manifest(
+        artifact,
+        source_filename=source_filename,
+        authority=authority,
+        execution_environment=execution_environment,
+    )
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as zf:
         _zip_write(zf, source_filename, source)
-        _zip_write(zf, artifact.project_filename, artifact.project_bytes)
-        _zip_write(zf, artifact.intermediate_filename, artifact.intermediate_bytes)
-        _zip_write(zf, artifact.filename, artifact.bytes)
+        # 3MF and SL1 are already ZIP archives, and CTB carries its own compressed
+        # layer payloads. Re-deflating them wastes CPU while preserving no useful
+        # information, so store their exact bytes directly in the review bundle.
+        _zip_write(zf, artifact.project_filename, artifact.project_bytes, compress_type=zipfile.ZIP_STORED)
+        _zip_write(zf, artifact.intermediate_filename, artifact.intermediate_bytes, compress_type=zipfile.ZIP_STORED)
+        _zip_write(zf, artifact.filename, artifact.bytes, compress_type=zipfile.ZIP_STORED)
         _zip_write(zf, "uvtools-issues.txt", artifact.issue_text.encode("utf-8", errors="replace"))
         _zip_write(zf, "manifest.json", json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8"))
     return buffer.getvalue(), f"{safe_stem}-workpiece-resin-bundle.zip"
 
 
-def compact_metadata(artifact: NativeArtifact) -> str:
+def compact_metadata(
+    artifact: NativeArtifact,
+    *,
+    execution_environment: dict[str, object] | None = None,
+) -> str:
     payload = {
         "engine": {"prusaslicer": PRUSA_SLICER_VERSION, "uvtools": UVTOOLS_VERSION},
         "source_sha256": artifact.source_sha256,
@@ -352,4 +381,6 @@ def compact_metadata(artifact: NativeArtifact) -> str:
         "orientation_deg": {"x": artifact.orientation.x, "y": artifact.orientation.y, "z": artifact.orientation.z},
         "issues": artifact.issue_summary,
     }
+    if execution_environment is not None:
+        payload["execution_environment"] = dict(execution_environment)
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)

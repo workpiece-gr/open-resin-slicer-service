@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import os
 import re
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from .engine import (
@@ -26,8 +29,6 @@ from .stl import StlValidationError, validate_stl_bytes
 from .toolchain import (
     TOOLCHAIN_REF_ENV,
     ToolchainProvenanceError,
-    bind_bundle_toolchain,
-    bind_compact_metadata,
     resolve_toolchain_ref,
     toolchain_record,
 )
@@ -42,8 +43,37 @@ SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "240"))
 UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
 REJECT_CRITICAL = os.environ.get("REJECT_ON_CRITICAL_UVTOOLS_ISSUES", "1") not in {"0", "false", "False"}
 
+
+def _bounded_concurrency(name: str, default: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer between 1 and 4.") from exc
+    if not 1 <= value <= 4:
+        raise RuntimeError(f"{name} must be an integer between 1 and 4.")
+    return value
+
+
+def _capacity_wait_seconds() -> float:
+    raw = os.environ.get("RESOURCE_CAPACITY_WAIT_SECONDS", "0.25").strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError("RESOURCE_CAPACITY_WAIT_SECONDS must be between 0.01 and 10 seconds.") from exc
+    if not math.isfinite(value) or not 0.01 <= value <= 10.0:
+        raise RuntimeError("RESOURCE_CAPACITY_WAIT_SECONDS must be between 0.01 and 10 seconds.")
+    return value
+
+
+MAX_CONCURRENT_SLICES = _bounded_concurrency("MAX_CONCURRENT_SLICES", 1)
+MAX_CONCURRENT_PROXY_JOBS = _bounded_concurrency("MAX_CONCURRENT_PROXY_JOBS", 1)
+RESOURCE_CAPACITY_WAIT_SECONDS = _capacity_wait_seconds()
+SLICE_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
+PROXY_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_PROXY_JOBS)
+
 registry = ProfileRegistry(PROFILE_ROOT)
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.5.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.6.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -61,6 +91,17 @@ def _authorize(authorization: str | None) -> None:
         raise HTTPException(status_code=503, detail="Resin project API is not enabled.")
     if _bearer(authorization) != PROJECT_TOKEN:
         raise HTTPException(status_code=401, detail="Unauthorized.")
+
+
+async def _acquire_capacity(semaphore: asyncio.Semaphore, workload: str) -> None:
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=RESOURCE_CAPACITY_WAIT_SECONDS)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=f"{workload} capacity is busy; retry shortly.",
+            headers={"Retry-After": "2"},
+        ) from exc
 
 
 async def _read_stl_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -97,6 +138,12 @@ def health() -> dict:
             "uvtools": {"version": UVTOOLS_VERSION, "available": _binary_available(UVTOOLS_CMD)},
             "toolchain": _toolchain_health(),
         },
+        "resource_limits": {
+            "max_upload_bytes": MAX_UPLOAD_BYTES,
+            "max_concurrent_slices": MAX_CONCURRENT_SLICES,
+            "max_concurrent_proxy_jobs": MAX_CONCURRENT_PROXY_JOBS,
+            "capacity_wait_seconds": RESOURCE_CAPACITY_WAIT_SECONDS,
+        },
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
@@ -124,11 +171,19 @@ async def orientation_proxy(
 ) -> JSONResponse:
     """Geometry-only orientation screening; never grants manufacturing authority."""
     _authorize(authorization)
-    _, data = await _read_stl_upload(file)
+    await _acquire_capacity(PROXY_CAPACITY, "Orientation proxy")
     try:
-        plan = build_proxy_orientation_plan(data, finalist_limit=finalist_limit)
-    except (OrientationPlanError, OrientationProxyError, OrientationScreenError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _, data = await _read_stl_upload(file)
+        try:
+            plan = await run_in_threadpool(
+                build_proxy_orientation_plan,
+                data,
+                finalist_limit=finalist_limit,
+            )
+        except (OrientationPlanError, OrientationProxyError, OrientationScreenError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        PROXY_CAPACITY.release()
     return JSONResponse(
         content=proxy_orientation_plan_manifest(plan),
         headers={"Cache-Control": "private, no-store"},
@@ -153,34 +208,44 @@ async def _slice_request(
     except ToolchainProvenanceError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-    filename, data = await _read_stl_upload(file)
+    await _acquire_capacity(SLICE_CAPACITY, "Resin slicing")
     try:
-        stl = validate_stl_bytes(data)
-        registry.reload()
-        resolver = registry.resolve_production if production else registry.resolve_candidate
-        printer, resin, quality_profile = resolver(printer_profile, resin_profile, quality)
-        artifact = slice_native(
-            data,
-            original_name=filename,
-            printer=printer,
-            resin=resin,
-            quality=quality_profile,
-            orientation=Orientation(rotate_x, rotate_y, rotate_z),
-            prusa_bin=PRUSA_BIN,
-            uvtools_cmd=UVTOOLS_CMD,
-            slice_timeout=SLICE_TIMEOUT,
-            uvtools_timeout=UVTOOLS_TIMEOUT,
-            reject_critical=REJECT_CRITICAL if production else False,
-        )
-    except (StlValidationError, ProfileError, EngineError) as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        filename, data = await _read_stl_upload(file)
+        try:
+            stl = await run_in_threadpool(validate_stl_bytes, data)
+            registry.reload()
+            resolver = registry.resolve_production if production else registry.resolve_candidate
+            printer, resin, quality_profile = resolver(printer_profile, resin_profile, quality)
+            artifact = await run_in_threadpool(
+                slice_native,
+                data,
+                original_name=filename,
+                printer=printer,
+                resin=resin,
+                quality=quality_profile,
+                orientation=Orientation(rotate_x, rotate_y, rotate_z),
+                prusa_bin=PRUSA_BIN,
+                uvtools_cmd=UVTOOLS_CMD,
+                slice_timeout=SLICE_TIMEOUT,
+                uvtools_timeout=UVTOOLS_TIMEOUT,
+                reject_critical=REJECT_CRITICAL if production else False,
+            )
+            authority = "production-authoritative" if production else "acceptance-candidate-only"
+            execution_environment = toolchain_record(toolchain_ref)
+            bundle, bundle_filename = await run_in_threadpool(
+                build_review_bundle,
+                data,
+                original_name=filename,
+                artifact=artifact,
+                authority=authority,
+                execution_environment=execution_environment,
+            )
+        except (StlValidationError, ProfileError, EngineError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        SLICE_CAPACITY.release()
 
-    authority = "production-authoritative" if production else "acceptance-candidate-only"
-    bundle, bundle_filename = build_review_bundle(
-        data, original_name=filename, artifact=artifact, authority=authority
-    )
-    bundle = bind_bundle_toolchain(bundle, toolchain_ref)
-    metadata = bind_compact_metadata(compact_metadata(artifact), toolchain_ref)
+    metadata = compact_metadata(artifact, execution_environment=execution_environment)
     critical = sum(artifact.issue_summary.get(k, 0) for k in ("islands", "resin_traps", "suction_cups", "touching_bounds", "empty_layers"))
     headers = {
         "Content-Disposition": f'attachment; filename="{bundle_filename}"',

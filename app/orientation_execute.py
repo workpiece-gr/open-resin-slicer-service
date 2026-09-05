@@ -66,13 +66,7 @@ def execute_sliced_finalists(
     quality_profile: str,
     execute_finalist: Callable[[OrientationSpec], FinalistSliceResult],
 ) -> SlicedFinalistExecution:
-    """Execute exactly the proxy finalists and validate artifact-native measurement binding.
-
-    The callback is injected so this contract remains unit-testable without PrusaSlicer.
-    A real adapter must return the NativeArtifact plus metrics extracted from its exact
-    retained printer-native output; hidden Prusa state and proxy estimates are rejected
-    as measurement authority by contract.
-    """
+    """Execute exactly the proxy finalists and validate artifact-native measurement binding."""
     source_hash = hashlib.sha256(source_stl).hexdigest()
     if source_hash != proxy_plan.source_sha256:
         raise SlicedFinalistExecutionError(
@@ -132,6 +126,8 @@ def execute_sliced_finalists(
                 unresolved_islands=int(issues.get("islands", 0)),
                 unresolved_suction_cups=int(issues.get("suction_cups", 0)),
                 unresolved_resin_traps=int(issues.get("resin_traps", 0)),
+                unresolved_touching_bounds=int(issues.get("touching_bounds", 0)),
+                unresolved_empty_layers=int(issues.get("empty_layers", 0)),
             )
         )
         results.append(result)

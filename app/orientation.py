@@ -56,9 +56,7 @@ class OrientationMetrics:
     """Comparable orientation metrics.
 
     For sliced-validation these values must come from the exact retained printer-native
-    artifact: maximum illuminated layer area, total cured material volume, whole-print
-    XY footprint area, and print Z height. Proxy callers may use estimates only when
-    sliced validation is not required.
+    artifact. Critical UVtools issue counts are hard blockers before soft scoring.
     """
 
     max_layer_area_mm2: float
@@ -68,6 +66,8 @@ class OrientationMetrics:
     unresolved_islands: int = 0
     unresolved_suction_cups: int = 0
     unresolved_resin_traps: int = 0
+    unresolved_touching_bounds: int = 0
+    unresolved_empty_layers: int = 0
     source: str = "geometry-proxy"
 
     def validate(self) -> "OrientationMetrics":
@@ -78,6 +78,8 @@ class OrientationMetrics:
         _count("unresolved_islands", self.unresolved_islands)
         _count("unresolved_suction_cups", self.unresolved_suction_cups)
         _count("unresolved_resin_traps", self.unresolved_resin_traps)
+        _count("unresolved_touching_bounds", self.unresolved_touching_bounds)
+        _count("unresolved_empty_layers", self.unresolved_empty_layers)
         if self.source not in METRIC_SOURCES:
             raise OrientationPlanError(
                 f"metrics source must be one of: {', '.join(sorted(METRIC_SOURCES))}."
@@ -162,6 +164,10 @@ def _blocked_reasons(candidate: OrientationCandidate, *, require_sliced_validati
         reasons.append("unresolved-suction-cups")
     if metrics.unresolved_resin_traps:
         reasons.append("unresolved-resin-traps")
+    if metrics.unresolved_touching_bounds:
+        reasons.append("touching-bounds")
+    if metrics.unresolved_empty_layers:
+        reasons.append("empty-layers")
     if require_sliced_validation and metrics.source != "sliced-validation":
         reasons.append("metrics-not-sliced-validation")
     return tuple(reasons)
@@ -274,6 +280,8 @@ def orientation_decision_manifest(
                 "unresolved_islands": metrics.unresolved_islands,
                 "unresolved_suction_cups": metrics.unresolved_suction_cups,
                 "unresolved_resin_traps": metrics.unresolved_resin_traps,
+                "unresolved_touching_bounds": metrics.unresolved_touching_bounds,
+                "unresolved_empty_layers": metrics.unresolved_empty_layers,
             },
             "blocked_reasons": list(item.blocked_reasons),
             "score": item.score,
@@ -290,6 +298,8 @@ def orientation_decision_manifest(
             "unresolved-islands",
             "unresolved-suction-cups",
             "unresolved-resin-traps",
+            "touching-bounds",
+            "empty-layers",
         ],
         "scoring": {
             "normalization": "min-max across unblocked candidates",
