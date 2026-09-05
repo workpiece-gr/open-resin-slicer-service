@@ -8,6 +8,7 @@ from dataclasses import replace
 
 import pytest
 
+import app.order_selected as order_selected
 from app.coordinate_mapping import ManufacturingDisplayTransform
 from app.materialization_selected import materialize_selected_plate_project
 from app.materialized_3mf_instance_evidence import (
@@ -294,4 +295,93 @@ def test_plate_authority_rejects_incomplete_issue_receipt(tmp_path):
             changed_execution,
             whole_plate,
             printer=printer,
+        )
+
+
+def test_production_selected_order_embeds_exact_complete_plate_authority(tmp_path):
+    source = _source_project()
+    selected = _selected(source)
+    printer, instance_evidence, execution, whole_plate = _authority_inputs(tmp_path)
+    authority = validate_selected_plate_authority(
+        instance_evidence,
+        execution,
+        whole_plate,
+        printer=printer,
+    )
+    record = order_selected.SelectedPlateArtifactRecord(
+        plate_index=1,
+        project_filename="plate-1.3mf",
+        intermediate_filename="plate-1.sl1",
+        intermediate_sha256=execution.artifact.intermediate_sha256,
+        native_filename="plate-1.ctb",
+        native_sha256=execution.artifact.native_sha256,
+        issue_summary=execution.artifact.issue_summary,
+        materialization=instance_evidence.materialized_plate,
+        authority_evidence=authority,
+    )
+
+    manifest = order_selected.build_selected_orientation_order_manifest(
+        source_filename="part.stl",
+        source_sha256=SOURCE_SHA,
+        requested_quantity=2,
+        printer_profile="printer-a",
+        resin_profile="resin-a",
+        quality_profile="quality-a",
+        selected_orientation_plan=selected,
+        plate_artifacts=(record,),
+        prusaslicer_version="2.9.6",
+        prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
+        uvtools_version="6.2.0",
+        authority="production-authoritative",
+    )
+
+    assert manifest["schema"] == "workpiece-resin-order-manifest-v4"
+    assert manifest["authority"] == "production-authoritative"
+    assert manifest["production_enablement_performed"] is False
+    assert manifest["plates"][0]["files"]["review_3mf"]["sha256"] == authority.materialized_project_sha256
+    assert manifest["plates"][0]["files"]["intermediate_sl1"]["sha256"] == authority.plate_intermediate_sha256
+    assert manifest["plates"][0]["files"]["printer_native"]["sha256"] == authority.plate_printer_native_sha256
+    assert manifest["plates"][0]["plate_authority"]["production_plate_authority_ready"] is True
+    assert manifest["plates"][0]["plate_authority"]["production_enablement_performed"] is False
+
+
+def test_production_selected_order_rejects_authority_bound_to_different_final_native(tmp_path):
+    source = _source_project()
+    selected = _selected(source)
+    printer, instance_evidence, execution, whole_plate = _authority_inputs(tmp_path)
+    authority = validate_selected_plate_authority(
+        instance_evidence,
+        execution,
+        whole_plate,
+        printer=printer,
+    )
+    record = order_selected.SelectedPlateArtifactRecord(
+        plate_index=1,
+        project_filename="plate-1.3mf",
+        intermediate_filename="plate-1.sl1",
+        intermediate_sha256=execution.artifact.intermediate_sha256,
+        native_filename="plate-1.ctb",
+        native_sha256="f" * 64,
+        issue_summary=execution.artifact.issue_summary,
+        materialization=instance_evidence.materialized_plate,
+        authority_evidence=authority,
+    )
+
+    with pytest.raises(
+        order_selected.SelectedOrientationOrderError,
+        match="printer-native hash does not match",
+    ):
+        order_selected.build_selected_orientation_order_manifest(
+            source_filename="part.stl",
+            source_sha256=SOURCE_SHA,
+            requested_quantity=2,
+            printer_profile="printer-a",
+            resin_profile="resin-a",
+            quality_profile="quality-a",
+            selected_orientation_plan=selected,
+            plate_artifacts=(record,),
+            prusaslicer_version="2.9.6",
+            prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
+            uvtools_version="6.2.0",
+            authority="production-authoritative",
         )
