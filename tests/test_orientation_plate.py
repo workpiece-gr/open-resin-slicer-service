@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from app.native_envelope import native_envelope_from_rectangle
 from app.orientation_candidates import OrientationSpec
 from app.orientation_plate import (
     OrientationPlatePlanError,
@@ -11,8 +12,8 @@ from app.orientation_plate import (
 from app.orientation_proxy import GeometryProxyMetrics
 from app.orientation_screen import ProxyCandidate, screen_geometry_proxies
 from app.orientation_sliced import SlicedFinalistEvidence, validate_sliced_finalists
-from app.placement import Envelope2D
 from app.profiles import ProfileRegistry
+from app.uvtools_metrics import NativeBoundingRectangle
 
 
 SOURCE_SHA = "d" * 64
@@ -82,16 +83,26 @@ def _registry() -> ProfileRegistry:
     return ProfileRegistry(Path(__file__).parents[1] / "profiles")
 
 
-def test_selected_sliced_supported_envelope_drives_profile_backed_plate_plan():
+def _native_envelope(*, native_sha: str = NATIVE_SHA, printer: str = "elegoo-mars-2"):
+    return native_envelope_from_rectangle(
+        printer_profile_id=printer,
+        printer_native_sha256=native_sha,
+        rectangle=NativeBoundingRectangle(
+            x_mm=10,
+            y_mm=20,
+            width_mm=30,
+            height_mm=30,
+        ),
+    )
+
+
+def test_selected_ctb_native_envelope_drives_profile_backed_plate_plan_dimensions():
     validation = _sliced_validation()
-    envelope = Envelope2D(100, 130, -20, 10)
     result = plan_selected_sliced_orientation(
         registry=_registry(),
         printer_profile_id="elegoo-mars-2",
         sliced_validation=validation,
-        review_project_sha256=PROJECT_SHA,
-        effective_config_sha256=CONFIG_SHA,
-        pretranslation_envelope=envelope,
+        native_envelope=_native_envelope(),
         quantity=3,
     )
     assert result.source_sha256 == SOURCE_SHA
@@ -99,35 +110,34 @@ def test_selected_sliced_supported_envelope_drives_profile_backed_plate_plan():
     assert result.effective_config_sha256 == CONFIG_SHA
     assert result.intermediate_sha256 == INTERMEDIATE_SHA
     assert result.native_sha256 == NATIVE_SHA
+    assert result.pretranslation_envelope.min_x_mm == 10
+    assert result.pretranslation_envelope.min_y_mm == 20
     assert result.pretranslation_envelope.width_mm == 30
     assert result.pretranslation_envelope.depth_mm == 30
+    assert result.pretranslation_coordinate_space == "uvtools-native-display-millimetres"
     assert result.printer_plate_plan.plan.instance_footprint_width_mm == 30
     assert result.printer_plate_plan.plan.instance_footprint_depth_mm == 30
     assert result.printer_plate_plan.printer_profile_id == "elegoo-mars-2"
 
 
-def test_plate_plan_rejects_envelope_not_bound_to_selected_review_project():
-    with pytest.raises(OrientationPlatePlanError, match="not bound to the selected"):
+def test_plate_plan_rejects_native_envelope_not_bound_to_selected_ctb():
+    with pytest.raises(OrientationPlatePlanError, match="exact selected printer-native"):
         plan_selected_sliced_orientation(
             registry=_registry(),
             printer_profile_id="elegoo-mars-2",
             sliced_validation=_sliced_validation(),
-            review_project_sha256="f" * 64,
-            effective_config_sha256=CONFIG_SHA,
-            pretranslation_envelope=Envelope2D(0, 30, 0, 30),
+            native_envelope=_native_envelope(native_sha="f" * 64),
             quantity=1,
         )
 
 
-def test_plate_plan_rejects_envelope_not_bound_to_selected_effective_config():
-    with pytest.raises(OrientationPlatePlanError, match="effective config"):
+def test_plate_plan_rejects_native_envelope_from_different_printer_profile():
+    with pytest.raises(OrientationPlatePlanError, match="printer profile"):
         plan_selected_sliced_orientation(
             registry=_registry(),
             printer_profile_id="elegoo-mars-2",
             sliced_validation=_sliced_validation(),
-            review_project_sha256=PROJECT_SHA,
-            effective_config_sha256="f" * 64,
-            pretranslation_envelope=Envelope2D(0, 30, 0, 30),
+            native_envelope=_native_envelope(printer="different-printer"),
             quantity=1,
         )
 
@@ -138,25 +148,21 @@ def test_plate_plan_rejects_manual_review_only_orientation_result():
             registry=_registry(),
             printer_profile_id="elegoo-mars-2",
             sliced_validation=_sliced_validation(block_all=True),
-            review_project_sha256=PROJECT_SHA,
-            effective_config_sha256=CONFIG_SHA,
-            pretranslation_envelope=Envelope2D(0, 30, 0, 30),
+            native_envelope=_native_envelope(),
             quantity=1,
         )
 
 
-def test_manifest_binds_upstream_source_and_sliced_recipe_and_keeps_mars2_non_authoritative():
+def test_manifest_binds_native_envelope_and_keeps_mars2_non_authoritative():
     result = plan_selected_sliced_orientation(
         registry=_registry(),
         printer_profile_id="elegoo-mars-2",
         sliced_validation=_sliced_validation(),
-        review_project_sha256=PROJECT_SHA,
-        effective_config_sha256=CONFIG_SHA,
-        pretranslation_envelope=Envelope2D(100, 130, -20, 10),
+        native_envelope=_native_envelope(),
         quantity=3,
     )
     manifest = orientation_plate_plan_manifest(result)
-    assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v1"
+    assert manifest["schema"] == "workpiece-resin-orientation-plate-plan-v2"
     assert manifest["source_sha256"] == SOURCE_SHA
     assert manifest["selected_review_3mf_sha256"] == PROJECT_SHA
     assert manifest["selected_sliced_artifacts"] == {
@@ -165,7 +171,11 @@ def test_manifest_binds_upstream_source_and_sliced_recipe_and_keeps_mars2_non_au
         "intermediate_sl1_sha256": INTERMEDIATE_SHA,
         "printer_native_sha256": NATIVE_SHA,
     }
-    assert manifest["supported_pretranslation_envelope_mm"]["width"] == 30
+    envelope = manifest["supported_pretranslation_envelope_mm"]
+    assert envelope["width"] == 30
+    assert envelope["depth"] == 30
+    assert envelope["coordinate_space"] == "uvtools-native-display-millimetres"
+    assert envelope["source"] == "exact-selected-printer-native-bounding-rectangle"
     assert manifest["plate_plan"]["printer_profile_id"] == "elegoo-mars-2"
     assert manifest["plate_plan"]["manufacturing_envelope_coordinate_mapping"] == "unverified"
     assert manifest["automatic_materialization_authority"] is False

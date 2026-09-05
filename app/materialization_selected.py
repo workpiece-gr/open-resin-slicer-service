@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from .materialization import (
@@ -12,7 +12,10 @@ from .materialization import (
     materialized_plate_manifest,
     prepare_printer_plate_materialization,
 )
-from .orientation_plate import SelectedOrientationPlatePlan
+from .orientation_plate import (
+    MANUFACTURING_ENVELOPE_COORDINATE_SPACE,
+    SelectedOrientationPlatePlan,
+)
 
 
 SELECTED_MATERIALIZATION_SCHEMA = "workpiece-resin-selected-materialized-plate-v1"
@@ -68,7 +71,13 @@ def prepare_selected_plate_materialization(
     plate_index: int,
     require_validated_mapping: bool = True,
 ) -> SelectedPlateMaterializationSpec:
-    """Prepare one plate only from the exact source-bound sliced-orientation winner."""
+    """Prepare one plate only from the exact source-bound sliced-orientation winner.
+
+    Native-display envelope coordinates are valid for packing dimensions but cannot drive
+    automatic physical translation. Default materialization therefore also requires the
+    selected pretranslation envelope to have been explicitly converted into the validated
+    Workpiece manufacturing-envelope coordinate space.
+    """
     source_hash = _sha256("source_sha256", selected_plan.source_sha256)
     review_hash = _sha256(
         "selected_review_3mf_sha256", selected_plan.review_project_sha256
@@ -83,12 +92,24 @@ def prepare_selected_plate_materialization(
         "selected_printer_native_sha256", selected_plan.native_sha256
     )
 
+    coordinate_ready = (
+        selected_plan.pretranslation_coordinate_space
+        == MANUFACTURING_ENVELOPE_COORDINATE_SPACE
+    )
+    if require_validated_mapping and not coordinate_ready:
+        raise SelectedMaterializationError(
+            "Selected supported envelope is not expressed in validated manufacturing-envelope coordinates; a physical mapping transform is required before automatic materialization."
+        )
+
     plate_spec = prepare_printer_plate_materialization(
         selected_plan.printer_plate_plan,
         plate_index=plate_index,
         pretranslation_envelope=selected_plan.pretranslation_envelope,
         require_validated_mapping=require_validated_mapping,
     )
+    if not coordinate_ready and plate_spec.automatic_materialization_authority:
+        plate_spec = replace(plate_spec, automatic_materialization_authority=False)
+
     return SelectedPlateMaterializationSpec(
         source_sha256=source_hash,
         selected_orientation_deg=selected_plan.orientation_deg,
@@ -162,6 +183,6 @@ def selected_materialized_plate_manifest(
         "materialized_plate": materialized_plate_manifest(evidence.materialized_plate),
         "provenance_rule": (
             "This per-plate 3MF output was materialized through the selected-orientation path from the exact source-bound sliced winner and its retained effective config; "
-            "its final supported/padded envelopes are separately re-extracted and bound to the exact plate 3MF hash."
+            "its final supported/padded envelopes are separately re-extracted and bound to the exact plate 3MF hash. Native-display envelope coordinates never authorize physical translation until a validated manufacturing-coordinate transform has been applied."
         ),
     }

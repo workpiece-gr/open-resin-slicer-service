@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
+
+import pytest
 
 from app.materialization import MaterializedEnvelopeObservation
 from app.materialization_selected import (
+    SelectedMaterializationError,
     finalize_selected_materialized_plate,
     prepare_selected_plate_materialization,
     selected_materialized_plate_manifest,
@@ -106,3 +110,25 @@ def test_selected_materialization_uses_selected_supported_envelope_for_translati
     first_placement = selected.printer_plate_plan.plan.plates[0].placements[0]
     assert first.translate_x_mm == first_placement.x_mm - 115
     assert first.translate_y_mm == first_placement.y_mm - (-5)
+
+
+def test_native_display_envelope_cannot_gain_materialization_authority_from_status_string_alone():
+    selected = _selected_plan()
+    selected = replace(
+        selected,
+        printer_plate_plan=replace(
+            selected.printer_plate_plan,
+            manufacturing_envelope_coordinate_mapping="validated",
+        ),
+        pretranslation_coordinate_space="uvtools-native-display-millimetres",
+    )
+
+    with pytest.raises(SelectedMaterializationError, match="physical mapping transform"):
+        prepare_selected_plate_materialization(selected, plate_index=1)
+
+    candidate_spec = prepare_selected_plate_materialization(
+        selected,
+        plate_index=1,
+        require_validated_mapping=False,
+    )
+    assert candidate_spec.plate_spec.automatic_materialization_authority is False

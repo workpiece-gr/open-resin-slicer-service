@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from .native_envelope import NativeEnvelopeError, NativeEnvelopeEvidence
 from .orientation_sliced import SlicedOrientationValidation
 from .placement import Envelope2D
 from .plate import (
@@ -13,7 +14,8 @@ from .plate import (
 from .profiles import ProfileRegistry
 
 
-ORIENTATION_PLATE_SCHEMA = "workpiece-resin-orientation-plate-plan-v1"
+ORIENTATION_PLATE_SCHEMA = "workpiece-resin-orientation-plate-plan-v2"
+MANUFACTURING_ENVELOPE_COORDINATE_SPACE = "workpiece-manufacturing-envelope-millimetres"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -40,6 +42,7 @@ class SelectedOrientationPlatePlan:
     native_sha256: str
     pretranslation_envelope: Envelope2D
     printer_plate_plan: PrinterPlatePlan
+    pretranslation_coordinate_space: str = "legacy-unverified"
 
 
 def plan_selected_sliced_orientation(
@@ -47,37 +50,42 @@ def plan_selected_sliced_orientation(
     registry: ProfileRegistry,
     printer_profile_id: str,
     sliced_validation: SlicedOrientationValidation,
-    review_project_sha256: str,
-    effective_config_sha256: str,
-    pretranslation_envelope: Envelope2D,
+    native_envelope: NativeEnvelopeEvidence,
     quantity: int,
     spacing_mm: float = 5.0,
     edge_margin_mm: float = 3.0,
     allow_rotate_90: bool = True,
 ) -> SelectedOrientationPlatePlan:
-    """Pack only the exact selected sliced recipe's supported/padded XY envelope."""
+    """Pack only the exact selected CTB's supported/padded XY envelope dimensions.
+
+    The native envelope's width/depth are authoritative for candidate packing because they
+    come from the exact retained printer-native artifact. Its X/Y coordinates remain in
+    UVtools native display space and are *not* interpreted as manufacturing coordinates.
+    """
     selected = sliced_validation.selected_evidence
     if selected is None:
         raise OrientationPlatePlanError(
             "Sliced orientation validation has no selected finalist; plate planning requires manual review."
         )
 
-    supplied_hash = _sha256("review_project_sha256", review_project_sha256)
-    selected_hash = _sha256(
-        "selected review_project_sha256", selected.review_project_sha256
-    )
-    if supplied_hash != selected_hash:
+    try:
+        native_envelope.validate()
+    except NativeEnvelopeError as exc:
+        raise OrientationPlatePlanError(str(exc)) from exc
+
+    if native_envelope.printer_profile_id != printer_profile_id:
         raise OrientationPlatePlanError(
-            "Supported/padded envelope is not bound to the selected sliced review 3MF; re-extract from the exact selected recipe."
+            "Native envelope printer profile does not match the requested printer-backed plate plan."
         )
 
-    supplied_config_hash = _sha256("effective_config_sha256", effective_config_sha256)
-    selected_config_hash = _sha256(
-        "selected effective_config_sha256", selected.effective_config_sha256
+    selected_native_hash = _sha256("selected native_sha256", selected.native_sha256)
+    envelope_native_hash = _sha256(
+        "native envelope printer_native_sha256",
+        native_envelope.printer_native_sha256,
     )
-    if supplied_config_hash != selected_config_hash:
+    if envelope_native_hash != selected_native_hash:
         raise OrientationPlatePlanError(
-            "Supported/padded envelope is not bound to the selected effective config; re-extract from the exact selected recipe."
+            "Native envelope is not bound to the exact selected printer-native artifact."
         )
 
     source_hash = _sha256("source_sha256", sliced_validation.source_sha256)
@@ -87,16 +95,12 @@ def plan_selected_sliced_orientation(
             "Selected sliced evidence source hash does not match its validation bundle."
         )
 
-    if not isinstance(pretranslation_envelope, Envelope2D):
-        raise OrientationPlatePlanError(
-            "pretranslation_envelope must be an Envelope2D extracted from the selected supported/padded recipe."
-        )
-
+    envelope = native_envelope.envelope
     profile_plan = plan_printer_profile_instances(
         registry=registry,
         printer_profile_id=printer_profile_id,
-        footprint_width_mm=pretranslation_envelope.width_mm,
-        footprint_depth_mm=pretranslation_envelope.depth_mm,
+        footprint_width_mm=envelope.width_mm,
+        footprint_depth_mm=envelope.depth_mm,
         quantity=quantity,
         spacing_mm=spacing_mm,
         edge_margin_mm=edge_margin_mm,
@@ -105,25 +109,33 @@ def plan_selected_sliced_orientation(
     return SelectedOrientationPlatePlan(
         orientation_deg=selected.canonical_key,
         source_sha256=source_hash,
-        review_project_sha256=selected_hash,
-        effective_config_sha256=selected_config_hash,
+        review_project_sha256=_sha256(
+            "selected review_project_sha256", selected.review_project_sha256
+        ),
+        effective_config_sha256=_sha256(
+            "selected effective_config_sha256", selected.effective_config_sha256
+        ),
         intermediate_sha256=_sha256(
             "selected intermediate_sha256", selected.intermediate_sha256
         ),
-        native_sha256=_sha256("selected native_sha256", selected.native_sha256),
-        pretranslation_envelope=pretranslation_envelope,
+        native_sha256=selected_native_hash,
+        pretranslation_envelope=envelope,
         printer_plate_plan=profile_plan,
+        pretranslation_coordinate_space=native_envelope.coordinate_space,
     )
 
 
 def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dict:
     envelope = result.pretranslation_envelope
     plate_manifest = printer_plate_plan_manifest(result.printer_plate_plan)
+    coordinate_ready = (
+        result.pretranslation_coordinate_space == MANUFACTURING_ENVELOPE_COORDINATE_SPACE
+    )
     return {
         "schema": ORIENTATION_PLATE_SCHEMA,
-        "automatic_materialization_authority": plate_manifest[
-            "automatic_materialization_authority"
-        ],
+        "automatic_materialization_authority": bool(
+            plate_manifest["automatic_materialization_authority"] and coordinate_ready
+        ),
         "source_sha256": _sha256("source_sha256", result.source_sha256),
         "selected_orientation_deg": {
             "x": result.orientation_deg[0],
@@ -152,10 +164,13 @@ def orientation_plate_plan_manifest(result: SelectedOrientationPlatePlan) -> dic
             "max_y": envelope.max_y_mm,
             "width": envelope.width_mm,
             "depth": envelope.depth_mm,
+            "coordinate_space": result.pretranslation_coordinate_space,
+            "source": "exact-selected-printer-native-bounding-rectangle",
         },
         "plate_plan": plate_manifest,
         "review_rule": (
-            "Packing dimensions come only from the actual supported/padded envelope extracted from the exact selected sliced 3MF + effective-config recipe for this exact source STL. "
-            "If source, config, orientation, supports, pad geometry, or retained 3MF changes, discard this plan and re-extract/replan."
+            "Packing width/depth come only from the exact selected printer-native bounding rectangle, which is hash-bound to the sliced winner. "
+            "Native X/Y remain in UVtools display coordinates and must not be treated as conservative manufacturing-envelope coordinates. "
+            "Automatic physical placement remains blocked until a separately validated mapping transform converts this envelope into Workpiece manufacturing-envelope coordinates."
         ),
     }
