@@ -63,6 +63,24 @@ def _fake_engine(monkeypatch, *, issue_text: str = "Issues: 0\n"):
         if len(command) >= 2 and command[1] == "print-issues":
             assert Path(command[2]).read_bytes() == b"exact plate ctb"
             return subprocess.CompletedProcess(command, 1, issue_text)
+        if len(command) >= 2 and command[1] == "print-properties" and "-r" not in command:
+            assert Path(command[2]).read_bytes() == b"exact plate ctb"
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                "LayerCount: 2\n"
+                "PrintHeight: 0.1\n"
+                "BoundingRectangleMillimeters: X=10 Y=20 Width=30 Height=40\n",
+            )
+        if len(command) >= 2 and command[1] == "print-properties" and "-r" in command:
+            assert Path(command[2]).read_bytes() == b"exact plate ctb"
+            assert command[command.index("-r") + 1] == "0:1"
+            return subprocess.CompletedProcess(
+                command,
+                1,
+                "# Layer: 0\nArea: 100\nVolume: 0.5\n"
+                "# Layer: 1\nArea: 200\nVolume: 0.7\n",
+            )
         raise AssertionError(f"Unexpected engine command: {command}")
 
     monkeypatch.setattr(plate_slice, "_run", fake_run)
@@ -95,7 +113,7 @@ def _call(tmp_path: Path, monkeypatch, *, reject_critical: bool = True, issue_te
 def test_slices_exact_materialized_project_without_rebuild_or_rearrange(tmp_path, monkeypatch):
     result, calls = _call(tmp_path, monkeypatch)
 
-    assert len(calls) == 3
+    assert len(calls) == 5
     assert result.project_bytes == b"exact materialized project"
     assert result.project_sha256 == _sha(result.project_bytes)
     assert result.effective_config_bytes == b"exact selected config"
@@ -112,6 +130,13 @@ def test_slices_exact_materialized_project_without_rebuild_or_rearrange(tmp_path
         "touching_bounds": 0,
         "empty_layers": 0,
     }
+    assert result.native_metrics.layer_count == 2
+    assert result.native_metrics.max_layer_area_mm2 == 200
+    assert result.native_metrics.material_volume_mm3 == 1.2
+    assert result.native_metrics.footprint_area_mm2 == 1200
+    assert result.native_metrics.z_height_mm == 0.1
+    rectangle = result.native_metrics.bounding_rectangle
+    assert (rectangle.x_mm, rectangle.y_mm, rectangle.width_mm, rectangle.height_mm) == (10, 20, 30, 40)
     assert result.printer_profile_id == "printer-a"
 
 
@@ -190,11 +215,13 @@ def test_critical_uvtools_issue_blocks_authoritative_plate_slice(tmp_path, monke
 
 
 def test_candidate_mode_retains_critical_issue_evidence_without_hiding_it(tmp_path, monkeypatch):
-    result, _ = _call(
+    result, calls = _call(
         tmp_path,
         monkeypatch,
         reject_critical=False,
         issue_text="Issues: 1\nIsland,1\n",
     )
+    assert len(calls) == 5
     assert result.issue_summary["islands"] == 1
     assert "Island,1" in result.issue_text
+    assert result.native_metrics.bounding_rectangle.width_mm == 30
