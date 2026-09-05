@@ -19,6 +19,14 @@ from .engine import (
 )
 from .profiles import ProfileError, ProfileRegistry
 from .stl import StlValidationError, validate_stl_bytes
+from .toolchain import (
+    TOOLCHAIN_REF_ENV,
+    ToolchainProvenanceError,
+    bind_bundle_toolchain,
+    bind_compact_metadata,
+    resolve_toolchain_ref,
+    toolchain_record,
+)
 
 PROFILE_ROOT = Path(os.environ.get("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.environ.get("SOURCE_CODE_URL", "https://github.com/workpiece-gr/open-resin-slicer-service")
@@ -31,7 +39,7 @@ UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
 REJECT_CRITICAL = os.environ.get("REJECT_ON_CRITICAL_UVTOOLS_ISSUES", "1") not in {"0", "false", "False"}
 
 registry = ProfileRegistry(PROFILE_ROOT)
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.3.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.4.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -51,6 +59,19 @@ def _authorize(authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized.")
 
 
+def _toolchain_health() -> dict:
+    try:
+        ref = resolve_toolchain_ref(required=False)
+        return {**toolchain_record(ref), "valid": True}
+    except ToolchainProvenanceError as exc:
+        return {
+            "image_ref": os.environ.get(TOOLCHAIN_REF_ENV) or None,
+            "immutable": False,
+            "valid": False,
+            "error": str(exc),
+        }
+
+
 @app.get("/health")
 def health() -> dict:
     registry.reload()
@@ -60,6 +81,7 @@ def health() -> dict:
         "engines": {
             "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT, "available": _binary_available(PRUSA_BIN)},
             "uvtools": {"version": UVTOOLS_VERSION, "available": _binary_available(UVTOOLS_CMD)},
+            "toolchain": _toolchain_health(),
         },
         "candidate_profiles_ready": registry.candidate_ready,
         "production_profiles_ready": registry.production_ready,
@@ -93,6 +115,12 @@ async def _slice_request(
     production: bool,
 ) -> Response:
     _authorize(authorization)
+
+    try:
+        toolchain_ref = resolve_toolchain_ref(required=production)
+    except ToolchainProvenanceError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
     filename = file.filename or ""
     if not filename.lower().endswith(".stl"):
         raise HTTPException(status_code=400, detail="Resin input must be an STL file.")
@@ -124,7 +152,8 @@ async def _slice_request(
     bundle, bundle_filename = build_review_bundle(
         data, original_name=filename, artifact=artifact, authority=authority
     )
-    metadata = compact_metadata(artifact)
+    bundle = bind_bundle_toolchain(bundle, toolchain_ref)
+    metadata = bind_compact_metadata(compact_metadata(artifact), toolchain_ref)
     critical = sum(artifact.issue_summary.get(k, 0) for k in ("islands", "resin_traps", "suction_cups", "touching_bounds", "empty_layers"))
     headers = {
         "Content-Disposition": f'attachment; filename="{bundle_filename}"',
@@ -141,6 +170,8 @@ async def _slice_request(
         "X-Workpiece-Resin-Metadata": metadata,
         "Cache-Control": "private, no-store",
     }
+    if toolchain_ref is not None:
+        headers["X-Workpiece-Toolchain-Ref"] = toolchain_ref
     return Response(content=bundle, media_type="application/zip", headers=headers)
 
 
