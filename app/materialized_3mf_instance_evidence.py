@@ -27,6 +27,8 @@ from .prusa_3mf_instances import (
     MAX_MATERIALIZED_INSTANCES,
     MAX_MODEL_XML_BYTES,
     MODEL_MEMBER,
+    ThreeMFMaterializationError,
+    materialize_prusa_project_instances,
 )
 
 
@@ -51,6 +53,7 @@ class ExtractedBuildItem:
 
 @dataclass(frozen=True)
 class VerifiedBuildItemEvidence:
+    selected_review_project_sha256: str
     project_sha256: str
     object_id: int
     instance_indices: tuple[int, ...]
@@ -236,14 +239,29 @@ def extract_materialized_build_items(
 
 def verify_materialized_project_build_items(
     materialization: SelectedPlateProjectMaterialization,
+    *,
+    selected_review_project_bytes: bytes,
 ) -> VerifiedBuildItemEvidence:
-    """Prove the transforms stored in the exact 3MF equal the materializer receipt."""
+    """Reconstruct the full project, require byte identity, then parse build items back."""
     project = materialization.project
     project_hash = _sha256("materialized project sha256", project.sha256)
     if hashlib.sha256(project.bytes).hexdigest() != project_hash:
         raise Materialized3MFInstanceEvidenceError(
             "Materialized 3MF project bytes do not match the materializer SHA-256 receipt."
         )
+    source_hash = _sha256(
+        "selected review project sha256",
+        materialization.spec.selected_review_3mf_sha256,
+    )
+    if not isinstance(selected_review_project_bytes, bytes) or not selected_review_project_bytes:
+        raise Materialized3MFInstanceEvidenceError(
+            "selected_review_project_bytes must contain the exact non-empty selected review 3MF."
+        )
+    if hashlib.sha256(selected_review_project_bytes).hexdigest() != source_hash:
+        raise Materialized3MFInstanceEvidenceError(
+            "Selected review 3MF bytes do not match the exact sliced-winner SHA-256 receipt."
+        )
+
     indices = tuple(project.instance_indices)
     expected_indices = tuple(
         item.instance_index for item in materialization.spec.plate_spec.translations
@@ -258,6 +276,28 @@ def verify_materialized_project_build_items(
             "Materializer instance count/transform receipt does not match its instance indices."
         )
 
+    try:
+        reconstructed = materialize_prusa_project_instances(
+            selected_review_project_bytes,
+            source_project_sha256=source_hash,
+            source_display_envelope=materialization.source_display_envelope,
+            placements=materialization.display_placements,
+        )
+    except ThreeMFMaterializationError as exc:
+        raise Materialized3MFInstanceEvidenceError(str(exc)) from exc
+    if reconstructed.bytes != project.bytes or reconstructed.sha256 != project_hash:
+        raise Materialized3MFInstanceEvidenceError(
+            "Exact materialized 3MF is not byte-for-byte equal to the deterministic rewrite of the selected review project."
+        )
+    if (
+        reconstructed.instance_indices != indices
+        or reconstructed.instance_count != project.instance_count
+        or reconstructed.display_transforms != project.display_transforms
+    ):
+        raise Materialized3MFInstanceEvidenceError(
+            "Materializer receipt differs from the deterministic full-project reconstruction."
+        )
+
     extracted = extract_materialized_build_items(
         project.bytes,
         project_sha256=project_hash,
@@ -267,16 +307,17 @@ def verify_materialized_project_build_items(
             "Exact materialized 3MF build-item count does not match the selected physical plate."
         )
     for index, (item, expected_transform) in enumerate(
-        zip(extracted, project.display_transforms, strict=True),
+        zip(extracted, reconstructed.display_transforms, strict=True),
         start=1,
     ):
         canonical = _canonical_written_transform(expected_transform)
         if item.transform != canonical:
             raise Materialized3MFInstanceEvidenceError(
-                f"Exact materialized 3MF build item {index} transform differs from the materializer receipt."
+                f"Exact materialized 3MF build item {index} transform differs from the deterministic rewrite."
             )
 
     return VerifiedBuildItemEvidence(
+        selected_review_project_sha256=source_hash,
         project_sha256=project_hash,
         object_id=extracted[0].object_id,
         instance_indices=indices,
@@ -368,18 +409,25 @@ def _verify_selected_plan_provenance(
 def finalize_selected_materialized_plate_from_verified_build_items(
     selected_plan: SelectedOrientationPlatePlan,
     materialization: SelectedPlateProjectMaterialization,
+    *,
+    selected_review_project_bytes: bytes,
 ) -> SelectedMaterialized3MFInstanceEvidence:
     """Validate per-instance materialized envelopes from exact 3MF build-item evidence.
 
-    This is deliberately not called geometry re-extraction. It parses every build-item
-    transform back from the exact materialized 3MF, proves those transforms equal the
-    deterministic materializer receipt, applies the verified rigid placements to the exact
-    selected single-instance CTB supported/padded display envelope, maps each rectangle
-    back through the exact validated manufacturing/display transform bound at planning
-    time, and finally runs the ordinary slot/margin/spacing validator.
+    This is deliberately not called geometry re-extraction. The exact materialized 3MF is
+    first rebuilt deterministically from the exact selected review 3MF, source CTB envelope
+    and retained placements; byte-for-byte equality proves all non-build project members
+    and metadata are unchanged. Every build-item transform is then parsed back from that
+    exact artifact. Per-instance supported/padded bounds are derived from the exact selected
+    single-instance CTB display envelope through those proven placements, mapped back via
+    the exact validated manufacturing/display transform, and passed through the ordinary
+    slot/margin/spacing validator.
     """
     _verify_selected_plan_provenance(selected_plan, materialization)
-    build_evidence = verify_materialized_project_build_items(materialization)
+    build_evidence = verify_materialized_project_build_items(
+        materialization,
+        selected_review_project_bytes=selected_review_project_bytes,
+    )
     transform = selected_plan.manufacturing_to_display_transform
     assert transform is not None  # checked above
 
@@ -477,6 +525,7 @@ def materialized_3mf_instance_evidence_manifest(
     return {
         "schema": INSTANCE_EVIDENCE_SCHEMA,
         "plate_index": finalized.plate_index,
+        "selected_review_project_sha256": build.selected_review_project_sha256,
         "materialized_project_sha256": build.project_sha256,
         "selected_printer_native_sha256": evidence.selected_printer_native_sha256,
         "selected_source_display_envelope_mm": {
@@ -489,10 +538,11 @@ def materialized_3mf_instance_evidence_manifest(
         "instance_count": len(build.instance_indices),
         "instances": items,
         "evidence_method": VERIFIED_BUILD_ITEM_OBSERVATION_SOURCE,
+        "full_project_deterministic_reconstruction_matched": True,
         "geometry_reextraction_performed": False,
         "per_instance_materialized_project_validation_satisfied": True,
         "whole_plate_native_validation_still_required": True,
         "validation_rule": (
-            "Every build item is parsed back from the exact SHA-bound materialized 3MF and must match the deterministic materializer transform receipt. Per-instance supported/padded bounds are then derived from the exact selected single-instance CTB envelope through those verified placements and the exact validated manufacturing/display transform before the ordinary slot, margin and spacing checks run. This is a transform proof, not geometry re-extraction; final native whole-plate UVtools validation remains an independent required gate."
+            "The exact per-plate 3MF must be byte-for-byte identical to a deterministic rewrite of the exact selected review 3MF using the exact CTB-bound source envelope and retained placements. Every build item is then parsed back from that exact artifact and must match the deterministic transform. Per-instance supported/padded bounds are derived from the exact selected single-instance CTB envelope through those proven placements and the exact validated manufacturing/display transform before slot, margin and spacing checks run. This is a transform proof, not geometry re-extraction; final native whole-plate UVtools validation remains an independent required gate."
         ),
     }
