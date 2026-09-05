@@ -51,6 +51,14 @@ A `production-authoritative` selected order requires one matching plate-authorit
 
 Creating these evidence objects does **not** enable production, change profile readiness, merge code, deploy a service or send a job to a printer.
 
+## Production orchestration and bundle boundary
+
+`app.production_orchestration.execute_selected_production_order()` now composes the already-validated library stages into one bounded server-side production-evidence run. It requires the production profile tuple and a digest-pinned `WORKPIECE_RESIN_TOOLCHAIN_REF` before finalist slicing, blocks on manual-review orientation outcomes, executes physical plates sequentially, requires full plate authority for every plate, and emits the selected order v4 manifest with the immutable execution-environment receipt.
+
+`app.production_bundle.build_selected_production_bundle()` then verifies every retained source/selected/plate payload against those receipts and creates one deterministic multi-plate ZIP containing the source STL, proxy/sliced orientation evidence, exact selected winner recipe/artifacts, every materialized 3MF/SL1/native file, per-plate UVtools reports, and the authority manifest.
+
+These library functions still do **not** enable the production HTTP route or change any profile readiness.
+
 ## HTTP boundary
 
 The HTTP service currently exposes:
@@ -59,7 +67,7 @@ The HTTP service currently exposes:
 - `/v1/candidate` for the non-authoritative direct acceptance bundle;
 - `/v1/project` as a reserved authenticated production endpoint that deliberately returns HTTP 503.
 
-The production endpoint remains fail-closed until one server request is wired through the complete selected-winner -> plate plan -> deterministic materialization -> per-instance evidence -> exact native slice -> whole-plate evidence -> plate authority -> selected order path. Adding a production-ready profile/compatibility tuple alone cannot activate production HTTP execution.
+The complete production coordinator and bundle builder now exist behind the HTTP boundary, but `/v1/project` remains deliberately fail-closed. Wiring that route to the coordinator/bundle is a separate production-enablement change and must not occur merely because a production-ready profile/compatibility tuple exists.
 
 ## Printer/resin validation gates
 
