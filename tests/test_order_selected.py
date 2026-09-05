@@ -115,7 +115,7 @@ def test_selected_order_derives_orientation_and_converts_only_bound_plate_eviden
     lower = captured["plate_artifacts"][0]
     assert lower.project_sha256 == PLATE_PROJECT_SHA
     assert lower.materialization is record.materialization.materialized_plate
-    assert manifest["schema"] == "workpiece-resin-order-manifest-v3"
+    assert manifest["schema"] == "workpiece-resin-order-manifest-v4"
     assert manifest["selected_orientation_plan"]["source_sha256"] == SOURCE_SHA
     assert manifest["plates"][0]["selected_materialization"]["selected_sliced_artifacts"] == {
         "review_3mf_sha256": SELECTED_PROJECT_SHA,
@@ -123,8 +123,11 @@ def test_selected_order_derives_orientation_and_converts_only_bound_plate_eviden
         "intermediate_sl1_sha256": SELECTED_INTERMEDIATE_SHA,
         "printer_native_sha256": SELECTED_NATIVE_SHA,
     }
+    assert manifest["plates"][0]["plate_authority"] is None
+    assert manifest["production_enablement_performed"] is False
     assert "effective config" in manifest["review_rule"]
     assert "unrelated materialized plate" in manifest["review_rule"]
+    assert "does not enable production" in manifest["review_rule"]
 
 
 def test_selected_order_rejects_source_that_differs_from_orientation_validation(monkeypatch):
@@ -176,3 +179,33 @@ def test_selected_order_rejects_plate_from_different_sliced_recipe(monkeypatch, 
             uvtools_version="6.2.0",
             authority="acceptance-candidate-only",
         )
+
+
+def test_production_selected_order_requires_plate_authority_before_lower_builder(monkeypatch):
+    called = False
+
+    def should_not_run(**kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("lower-level builder must not run without complete plate authority")
+
+    monkeypatch.setattr(order_selected, "build_order_manifest", should_not_run)
+    with pytest.raises(
+        order_selected.SelectedOrientationOrderError,
+        match="require complete plate authority evidence",
+    ):
+        order_selected.build_selected_orientation_order_manifest(
+            source_filename="part.stl",
+            source_sha256=SOURCE_SHA,
+            requested_quantity=1,
+            printer_profile="elegoo-mars-2",
+            resin_profile="elegoo-water-washable-grey",
+            quality_profile="balanced-0p05-medium",
+            selected_orientation_plan=_selected_plan(),
+            plate_artifacts=(_selected_plate_record(),),
+            prusaslicer_version="2.9.6",
+            prusaslicer_commit="b028299c770b8380ee81c921a2867d522f288123",
+            uvtools_version="6.2.0",
+            authority="production-authoritative",
+        )
+    assert called is False
