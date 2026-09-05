@@ -3,6 +3,7 @@ import math
 import pytest
 
 from app.uvtools_metrics import (
+    NativeBoundingRectangle,
     UVtoolsMetricError,
     base_property_command,
     layer_property_command,
@@ -77,6 +78,15 @@ def test_native_bounding_rectangle_requires_exact_complete_nonnegative_component
         parse_native_bounding_rectangle(BASE.replace("Y=2.5", "Y=-0.1"))
     with pytest.raises(UVtoolsMetricError, match="exactly one Height"):
         parse_native_bounding_rectangle(BASE.replace(",Height=30.25", ""))
+
+
+def test_native_bounding_rectangle_primitive_rejects_forged_invalid_values():
+    with pytest.raises(UVtoolsMetricError, match="non-negative"):
+        NativeBoundingRectangle(-1, 0, 2, 2)
+    with pytest.raises(UVtoolsMetricError, match="positive"):
+        NativeBoundingRectangle(0, 0, 0, 2)
+    with pytest.raises(UVtoolsMetricError, match="finite"):
+        NativeBoundingRectangle(0, 0, math.inf, 2)
 
 
 def test_layer_parser_requires_exact_layer_coverage_and_properties():

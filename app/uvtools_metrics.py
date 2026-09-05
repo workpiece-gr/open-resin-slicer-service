@@ -23,6 +23,25 @@ class NativeBoundingRectangle:
     width_mm: float
     height_mm: float
 
+    def __post_init__(self) -> None:
+        values = (self.x_mm, self.y_mm, self.width_mm, self.height_mm)
+        if any(isinstance(value, bool) for value in values):
+            raise UVtoolsMetricError("Native bounding rectangle values must be finite numbers.")
+        try:
+            x, y, width, height = (float(value) for value in values)
+        except (TypeError, ValueError) as exc:
+            raise UVtoolsMetricError("Native bounding rectangle values must be finite numbers.") from exc
+        if not all(math.isfinite(value) for value in (x, y, width, height)):
+            raise UVtoolsMetricError("Native bounding rectangle values must be finite numbers.")
+        if x < 0 or y < 0:
+            raise UVtoolsMetricError("Native bounding rectangle X/Y must be non-negative display coordinates.")
+        if width <= 0 or height <= 0:
+            raise UVtoolsMetricError("Native bounding rectangle width and height must be positive.")
+        object.__setattr__(self, "x_mm", round(x, 6))
+        object.__setattr__(self, "y_mm", round(y, 6))
+        object.__setattr__(self, "width_mm", round(width, 6))
+        object.__setattr__(self, "height_mm", round(height, 6))
+
     @property
     def max_x_mm(self) -> float:
         return round(self.x_mm + self.width_mm, 6)
@@ -98,10 +117,10 @@ def parse_native_bounding_rectangle(output: str) -> NativeBoundingRectangle:
     if width <= 0 or height <= 0:
         raise UVtoolsMetricError("Native footprint width and height must be positive.")
     return NativeBoundingRectangle(
-        x_mm=round(x, 6),
-        y_mm=round(y, 6),
-        width_mm=round(width, 6),
-        height_mm=round(height, 6),
+        x_mm=x,
+        y_mm=y,
+        width_mm=width,
+        height_mm=height,
     )
 
 
