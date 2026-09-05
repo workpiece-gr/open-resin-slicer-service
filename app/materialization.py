@@ -20,7 +20,12 @@ class MaterializationError(ValueError):
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_OBSERVATION_SOURCE = "re-extracted-materialized-project"
+_REEXTRACTED_OBSERVATION_SOURCE = "re-extracted-materialized-project"
+_VERIFIED_BUILD_ITEM_OBSERVATION_SOURCE = "verified-materialized-3mf-build-items"
+_OBSERVATION_SOURCES = {
+    _REEXTRACTED_OBSERVATION_SOURCE,
+    _VERIFIED_BUILD_ITEM_OBSERVATION_SOURCE,
+}
 
 
 @dataclass(frozen=True)
@@ -39,16 +44,16 @@ class MaterializedEnvelopeObservation:
     instance_index: int
     envelope: Envelope2D
     project_sha256: str
-    source: str = _OBSERVATION_SOURCE
+    source: str = _REEXTRACTED_OBSERVATION_SOURCE
 
     def __post_init__(self) -> None:
         if isinstance(self.instance_index, bool) or not isinstance(self.instance_index, int) or self.instance_index < 1:
             raise MaterializationError("instance_index must be a positive integer.")
         if not _SHA256_RE.fullmatch(self.project_sha256):
             raise MaterializationError("project_sha256 must be a lowercase SHA-256 digest.")
-        if self.source != _OBSERVATION_SOURCE:
+        if self.source not in _OBSERVATION_SOURCES:
             raise MaterializationError(
-                "Materialized envelopes must be re-extracted from the exact materialized project."
+                "Materialized envelope evidence source is unsupported; use exact geometry re-extraction or verified materialized-3MF build-item evidence."
             )
 
 
@@ -107,11 +112,14 @@ def finalize_materialized_plate(
     project_bytes: bytes,
     observations: Iterable[MaterializedEnvelopeObservation],
 ) -> MaterializedPlateEvidence:
-    """Bind re-extracted final envelopes to the exact per-plate 3MF and validate them.
+    """Bind exact per-instance envelope evidence to the per-plate 3MF and validate it.
 
-    This function does not infer envelopes from planned geometry. Callers must provide
-    observations extracted from the exact materialized project bytes. Any support/pad
-    drift, missing instance, spacing violation or margin violation fails closed.
+    Supported evidence methods are deliberately explicit. Legacy callers may provide
+    envelopes re-extracted from the exact materialized project. The selected production
+    path may instead provide envelopes derived from the exact source CTB-supported bounds
+    after parsing and verifying every build-item transform stored in the exact materialized
+    3MF. Either method must remain bound to the exact project SHA and pass the same slot,
+    margin and spacing checks; inferred planner-only envelopes are not accepted.
     """
     if not isinstance(project_bytes, bytes) or not project_bytes:
         raise MaterializationError("project_bytes must contain the exact non-empty materialized 3MF bytes.")
@@ -119,6 +127,12 @@ def finalize_materialized_plate(
     observation_tuple = tuple(observations)
     if not observation_tuple:
         raise MaterializationError("At least one materialized envelope observation is required.")
+
+    sources = {item.source for item in observation_tuple}
+    if len(sources) != 1:
+        raise MaterializationError(
+            "All per-instance materialized envelope observations for one plate must use the same evidence method."
+        )
 
     envelopes: dict[int, Envelope2D] = {}
     for observation in observation_tuple:
@@ -153,6 +167,8 @@ def finalize_materialized_plate(
 
 
 def materialized_plate_manifest(evidence: MaterializedPlateEvidence) -> dict:
+    sources = sorted({item.source for item in evidence.observations})
+    evidence_source = sources[0] if len(sources) == 1 else "mixed-unsupported"
     return {
         "schema": "workpiece-resin-materialized-plate-v1",
         "printer_profile_id": evidence.printer_profile_id,
@@ -162,9 +178,9 @@ def materialized_plate_manifest(evidence: MaterializedPlateEvidence) -> dict:
             evidence.manufacturing_envelope_coordinate_mapping
         ),
         "automatic_materialization_authority": evidence.automatic_materialization_authority,
-        "envelope_observation_source": _OBSERVATION_SOURCE,
+        "envelope_observation_source": evidence_source,
         "validation_rule": (
-            "final supported/padded envelopes are re-extracted from the exact per-plate 3MF and must remain inside planned slots, margins and spacing"
+            "final supported/padded per-instance envelopes must be bound to the exact per-plate 3MF and validated against planned slots, margins and spacing; evidence may be exact geometry re-extraction or verified materialized-3MF build-item transforms applied to the exact selected CTB-supported envelope"
         ),
         "translations": [
             {
@@ -185,6 +201,7 @@ def materialized_plate_manifest(evidence: MaterializedPlateEvidence) -> dict:
                 "min_y_mm": item.envelope.min_y_mm,
                 "max_y_mm": item.envelope.max_y_mm,
                 "project_sha256": item.project_sha256,
+                "source": item.source,
             }
             for item in evidence.observations
         ],
