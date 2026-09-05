@@ -74,6 +74,35 @@ def _close(a: float, b: float, tolerance_mm: float) -> bool:
     return abs(a - b) <= tolerance_mm
 
 
+def expected_instance_envelope(
+    pretranslation_envelope: Envelope2D,
+    translation: InstanceTranslation,
+) -> Envelope2D:
+    """Predict the slot envelope under Workpiece's explicit common-rotation contract.
+
+    A common 90-degree plate rotation is defined around the exact pretranslation
+    supported/padded envelope centre, then that centre is translated to the target
+    planner centre. This definition avoids depending on any hidden PrusaSlicer pivot.
+    The real materializer must compose its 3MF instance transform to implement this
+    world-space operation and must still re-extract the exact final envelope afterwards.
+    """
+    if translation.rotation_z_deg == 0:
+        return pretranslation_envelope.translated(
+            translation.translate_x_mm,
+            translation.translate_y_mm,
+        )
+    if translation.rotation_z_deg != 90:
+        raise PlacementError("Only common 0 or 90 degree plate rotations are supported.")
+    half_width = pretranslation_envelope.depth_mm / 2
+    half_depth = pretranslation_envelope.width_mm / 2
+    return Envelope2D(
+        min_x_mm=translation.target_x_mm - half_width,
+        max_x_mm=translation.target_x_mm + half_width,
+        min_y_mm=translation.target_y_mm - half_depth,
+        max_y_mm=translation.target_y_mm + half_depth,
+    )
+
+
 def derive_plate_translations(
     plan: PlatePlan,
     *,
@@ -83,9 +112,11 @@ def derive_plate_translations(
 ) -> tuple[InstanceTranslation, ...]:
     """Derive XY translations from the actual pre-translation supported envelope.
 
-    ``pretranslation_envelope`` must already reflect every orientation operation,
-    support/pad generation step, and the plan's common Z rotation. This function
-    intentionally makes no assumption about STL/model origin or slicer rotation pivot.
+    ``pretranslation_envelope`` represents the selected supported/padded artifact before
+    the plate planner's optional common Z rotation. If the plan selects 90 degrees, the
+    materializer must rotate around this envelope's centre before translating that centre
+    to ``target_x_mm``/``target_y_mm``. This function intentionally makes no assumption
+    about STL origin or PrusaSlicer rotation pivot.
     """
     if isinstance(plate_index, bool) or not isinstance(plate_index, int):
         raise PlacementError("plate_index must be an integer.")
@@ -103,13 +134,13 @@ def derive_plate_translations(
     except StopIteration as exc:
         raise PlacementError(f"Unknown plate_index {plate_index}.") from exc
 
-    if not _close(pretranslation_envelope.width_mm, plan.placed_footprint_width_mm, tolerance_mm):
+    if not _close(pretranslation_envelope.width_mm, plan.instance_footprint_width_mm, tolerance_mm):
         raise PlacementError(
-            "Pre-translation envelope width differs from the footprint used for plate planning; replan required."
+            "Pre-translation envelope width differs from the source footprint used for plate planning; replan required."
         )
-    if not _close(pretranslation_envelope.depth_mm, plan.placed_footprint_depth_mm, tolerance_mm):
+    if not _close(pretranslation_envelope.depth_mm, plan.instance_footprint_depth_mm, tolerance_mm):
         raise PlacementError(
-            "Pre-translation envelope depth differs from the footprint used for plate planning; replan required."
+            "Pre-translation envelope depth differs from the source footprint used for plate planning; replan required."
         )
 
     return tuple(
