@@ -63,7 +63,7 @@ jobs:
 
       - name: Generate Mars 2 grey review bundle
         run: |
-          curl --fail-with-body \
+          if ! curl --fail-with-body \
             -H 'Authorization: Bearer acceptance-token' \
             -F 'file=@acceptance-cube.stl;type=model/stl' \
             -F 'printer_profile=elegoo-mars-2' \
@@ -74,7 +74,16 @@ jobs:
             -F 'rotate_z=25' \
             -D acceptance-headers.txt \
             -o acceptance-bundle.zip \
-            http://127.0.0.1:18080/v1/candidate
+            http://127.0.0.1:18080/v1/candidate; then
+            echo 'Candidate request failed. Response headers:'
+            cat acceptance-headers.txt || true
+            echo 'Candidate response body:'
+            cat acceptance-bundle.zip || true
+            echo
+            echo 'Acceptance service logs:'
+            docker logs workpiece-resin-acceptance || true
+            exit 1
+          fi
           cat acceptance-headers.txt
           unzip -l acceptance-bundle.zip
 
