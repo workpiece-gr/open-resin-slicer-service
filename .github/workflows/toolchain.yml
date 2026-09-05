@@ -94,7 +94,7 @@ jobs:
           print('Pinned resin toolchain candidate verified.')
           PY
 
-      - name: Exercise Mars 2 candidate artifact chain
+      - name: Exercise Mars 2 retained recipe artifact chain
         run: python3 scripts/toolchain_smoke.py
 
       - name: Require successful Mars 2 smoke chain
@@ -103,11 +103,12 @@ jobs:
           import json
           from pathlib import Path
           report = json.loads(Path('.toolchain-smoke/smoke-report.json').read_text())
-          assert report['schema'] == 'workpiece-resin-toolchain-smoke-v1'
+          assert report['schema'] == 'workpiece-resin-toolchain-smoke-v2'
+          assert report['recipe'] == 'review-3mf-plus-effective-config'
           assert report['ok'] is True, report
-          for name in ('review.3mf', 'production.sl1', 'production.ctb'):
+          for name in ('review.3mf', 'effective.ini', 'production.sl1', 'production.ctb'):
               assert report['files'][name]['size'] > 0, report['files'][name]
-          print('Mars 2 toolchain smoke chain verified.')
+          print('Mars 2 retained recipe smoke chain verified.')
           PY
 
       - name: Upload verification metadata

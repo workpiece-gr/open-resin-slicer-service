@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / ".toolchain-smoke"
 PROFILES = ROOT / "profiles"
 MAX_OUTPUT = 20_000
+MARS2_DISPLAY_CENTER = "41.31,65.28"
 
 
 def sha256(path: Path) -> str:
@@ -94,26 +95,32 @@ def main() -> int:
     write_cube_stl(WORK / "source.stl")
 
     report: dict = {
-        "schema": "workpiece-resin-toolchain-smoke-v1",
+        "schema": "workpiece-resin-toolchain-smoke-v2",
         "image": IMAGE,
+        "recipe": "review-3mf-plus-effective-config",
         "ok": False,
         "steps": [],
         "files": {},
         "errors": [],
     }
 
-    project_ok = run_step(report, "review-3mf", "/opt/prusaslicer/prusa-slicer", [
+    project_ok = run_step(report, "review-recipe", "/opt/prusaslicer/prusa-slicer", [
         "--load", "/profiles/printers/elegoo-mars-2.ini",
         "--load", "/profiles/resins/elegoo-water-washable-grey.ini",
         "--load", "/profiles/quality/balanced-0p05-medium.ini",
+        "--center", MARS2_DISPLAY_CENTER,
         "--rotate-x", "15", "--rotate-y", "0", "--rotate", "25",
+        "--save", "/work/effective.ini",
         "--export-3mf", "--output", "/work/review.3mf", "/work/source.stl",
     ])
     project_ok = require_file(report, "review.3mf") and project_ok
+    project_ok = require_file(report, "effective.ini") and project_ok
 
     slice_ok = False
     if project_ok:
         slice_ok = run_step(report, "intermediate-sl1", "/opt/prusaslicer/prusa-slicer", [
+            "--load", "/work/effective.ini",
+            "--dont-arrange",
             "--export-sla", "--output", "/work/production.sl1", "/work/review.3mf",
         ])
         slice_ok = require_file(report, "production.sl1") and slice_ok
