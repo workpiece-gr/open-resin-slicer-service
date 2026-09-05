@@ -66,13 +66,17 @@ def _capacity_wait_seconds() -> float:
     return value
 
 
+def _registry_snapshot() -> ProfileRegistry:
+    """Load one immutable request snapshot instead of mutating shared profile state."""
+    return ProfileRegistry(PROFILE_ROOT)
+
+
 MAX_CONCURRENT_SLICES = _bounded_concurrency("MAX_CONCURRENT_SLICES", 1)
 MAX_CONCURRENT_PROXY_JOBS = _bounded_concurrency("MAX_CONCURRENT_PROXY_JOBS", 1)
 RESOURCE_CAPACITY_WAIT_SECONDS = _capacity_wait_seconds()
 SLICE_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
 PROXY_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_PROXY_JOBS)
 
-registry = ProfileRegistry(PROFILE_ROOT)
 app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.6.0")
 
 
@@ -129,7 +133,7 @@ def _toolchain_health() -> dict:
 
 @app.get("/health")
 def health() -> dict:
-    registry.reload()
+    registry = _registry_snapshot()
     return {
         "ok": True,
         "service": "open-resin-slicer-service",
@@ -159,8 +163,7 @@ def source() -> RedirectResponse:
 
 @app.get("/v1/profiles")
 def profiles() -> dict:
-    registry.reload()
-    return registry.public_summary()
+    return _registry_snapshot().public_summary()
 
 
 @app.post("/v1/orientation/proxy")
@@ -213,7 +216,7 @@ async def _slice_request(
         filename, data = await _read_stl_upload(file)
         try:
             stl = await run_in_threadpool(validate_stl_bytes, data)
-            registry.reload()
+            registry = _registry_snapshot()
             resolver = registry.resolve_production if production else registry.resolve_candidate
             printer, resin, quality_profile = resolver(printer_profile, resin_profile, quality)
             artifact = await run_in_threadpool(
