@@ -1,0 +1,16 @@
+{
+  "schema": "workpiece-resin-toolchain-lock-v1",
+  "status": "unpublished",
+  "image": "ghcr.io/workpiece-gr/resin-slicer-toolchain",
+  "digest": null,
+  "tag": "prusa-2.9.6-uvtools-6.2.0",
+  "build_recipe": "Dockerfile.toolchain",
+  "prusaslicer": {
+    "version": "2.9.6",
+    "commit": "b028299c770b8380ee81c921a2867d522f288123"
+  },
+  "uvtools": {
+    "version": "6.2.0",
+    "archive_sha256": "cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f"
+  }
+}
