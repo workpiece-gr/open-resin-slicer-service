@@ -42,13 +42,14 @@ def test_immutable_ghcr_digest_is_accepted(monkeypatch):
     assert resolve_toolchain_ref(required=True) == VALID_REF
 
 
-def test_bundle_binding_records_toolchain_without_changing_payload():
+def test_bundle_binding_records_toolchain_without_changing_payload_or_engine_contract():
     rebound = bind_bundle_toolchain(_bundle(), VALID_REF)
     with zipfile.ZipFile(io.BytesIO(rebound)) as zf:
         assert zf.read("part.ctb") == b"ctb"
         manifest = json.loads(zf.read("manifest.json"))
-    assert manifest["engine"]["toolchain"] == {
-        "image_ref": VALID_REF,
+    assert manifest["engine"] == {"prusaslicer": {"version": "2.9.6"}}
+    assert manifest["execution_environment"] == {
+        "toolchain_image_ref": VALID_REF,
         "immutable": True,
     }
 
@@ -56,4 +57,7 @@ def test_bundle_binding_records_toolchain_without_changing_payload():
 def test_compact_metadata_binding_records_unresolved_candidate():
     metadata = bind_compact_metadata('{"engine":{"prusaslicer":"2.9.6"}}', None)
     payload = json.loads(metadata)
-    assert payload["toolchain"] == {"image_ref": None, "immutable": False}
+    assert payload["execution_environment"] == {
+        "toolchain_image_ref": None,
+        "immutable": False,
+    }
