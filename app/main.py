@@ -27,6 +27,7 @@ from .orientation_screen import MAX_PROXY_FINALISTS, OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
 from .stl import StlValidationError, validate_stl_bytes
 from .toolchain import (
+    TOOLCHAIN_REF_ENV,
     ToolchainProvenanceError,
     resolve_toolchain_ref,
     toolchain_record,
@@ -128,7 +129,7 @@ def _toolchain_health() -> dict:
         return {**toolchain_record(ref), "valid": True}
     except ToolchainProvenanceError as exc:
         return {
-            "toolchain_image_ref": os.environ.get("WORKPIECE_RESIN_TOOLCHAIN_IMAGE_REF") or None,
+            "toolchain_image_ref": os.environ.get(TOOLCHAIN_REF_ENV) or None,
             "immutable": False,
             "valid": False,
             "error": str(exc),
