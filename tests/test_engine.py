@@ -84,7 +84,7 @@ def _artifact() -> NativeArtifact:
         intermediate_sha256="sl1-sha",
         native_sha256="ctb-sha",
         issue_summary={"islands": 0},
-        issue_text="Islands: 0\n",
+        issue_text="Issues: 0\n",
         printer_profile="elegoo-mars-2",
         resin_profile="elegoo-water-washable-grey",
         quality_profile="balanced-0p05-medium",
@@ -159,12 +159,34 @@ def test_orientation_is_bounded_and_finite():
         Orientation(True, 0, 0).validate()
 
 
-def test_issue_parser_extracts_critical_categories():
-    text = "Islands: 7\nSuction cups: 2\nResin traps: 1\nTouching bounds: 3\nEmpty layers: 4\n"
+def test_issue_parser_matches_pinned_uvtools_6p2_output_contract():
+    text = (
+        "Opening file production.ctb: Done in 0.02s\n"
+        "Detecting issues: Done in 0.11s\n"
+        "Issues: 7\n"
+        "Island, 5, 20px², {X=1,Y=2,Width=3,Height=4}\n"
+        "Island, 9, 15px², {X=1,Y=2,Width=3,Height=4}\n"
+        "ResinTrap, 10-15  (6), 30px³, {X=1,Y=2,Width=3,Height=4}\n"
+        "SuctionCup, 20-25  (6), 40px³, {X=1,Y=2,Width=3,Height=4}\n"
+        "TouchingBound, 3, 5px², {X=0,Y=0,Width=1,Height=1}\n"
+        "EmptyLayer, 30, 0px², {X=0,Y=0,Width=0,Height=0}\n"
+        "PrintHeight, 31, 1px², {X=0,Y=0,Width=1,Height=1}\n"
+    )
     issues = parse_uvtools_issues(text)
-    assert issues["islands"] == 7
-    assert issues["suction_cups"] == 2
-    assert issues["resin_traps"] == 1
-    assert issues["touching_bounds"] == 3
-    assert issues["empty_layers"] == 4
-    assert critical_issue_count(issues) == 17
+    assert issues == {
+        "islands": 2,
+        "overhangs": 0,
+        "resin_traps": 1,
+        "suction_cups": 1,
+        "touching_bounds": 1,
+        "empty_layers": 1,
+    }
+    assert critical_issue_count(issues) == 6
+
+
+def test_issue_parser_accepts_confident_zero_and_fails_closed_on_changed_format():
+    assert critical_issue_count(parse_uvtools_issues("Issues: 0\n")) == 0
+    with pytest.raises(EngineError, match="incomplete"):
+        parse_uvtools_issues("Issues: 2\nIsland, 5, 20px², {X=1,Y=2,Width=3,Height=4}\n")
+    with pytest.raises(EngineError, match="unrecognized"):
+        parse_uvtools_issues("Issues: 1\nFutureIssueType, 5, 20px², {X=1,Y=2,Width=3,Height=4}\n")

@@ -189,25 +189,52 @@ def build_prusa_command(
 
 
 def parse_uvtools_issues(text: str) -> dict[str, int]:
-    """Best-effort stable extraction; raw output is always retained for review."""
+    """Parse the exact pinned UVtools 6.2.0 ``print-issues`` text contract.
+
+    UVtools 6.2.0 prints one ``Issues: N`` header followed by exactly N issue rows
+    whose first CSV field is the ``MainIssue.IssueType`` enum value. Production must
+    never interpret an absent/changed format as zero issues, so any mismatch fails
+    closed instead of returning a best-effort count.
+    """
     categories = {
-        "islands": ("island",),
-        "overhangs": ("overhang",),
-        "resin_traps": ("resin trap",),
-        "suction_cups": ("suction cup",),
-        "touching_bounds": ("touching bound",),
-        "empty_layers": ("empty layer",),
+        "Island": "islands",
+        "Overhang": "overhangs",
+        "ResinTrap": "resin_traps",
+        "SuctionCup": "suction_cups",
+        "TouchingBound": "touching_bounds",
+        "EmptyLayer": "empty_layers",
     }
-    lower = text.lower()
-    result: dict[str, int] = {}
-    for key, terms in categories.items():
-        count = 0
-        for term in terms:
-            matches = re.findall(rf"{re.escape(term)}s?[ \t]*[:=][ \t]*(\d+)", lower)
-            matches += re.findall(rf"(\d+)[ \t]+{re.escape(term)}s?\b", lower)
-            if matches:
-                count = max(count, *(int(x) for x in matches))
-        result[key] = count
+    recognized_types = {*categories, "PrintHeight", "Debug"}
+    result = {key: 0 for key in categories.values()}
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    headers = []
+    for index, line in enumerate(lines):
+        match = re.fullmatch(r"Issues:\s*(\d+)", line)
+        if match:
+            headers.append((index, match))
+    if len(headers) != 1:
+        raise EngineError(
+            f"Pinned UVtools {UVTOOLS_VERSION} issue output is not confidently parseable: expected one Issues total."
+        )
+
+    header_index, header = headers[0]
+    total = int(header.group(1))
+    issue_lines = lines[header_index + 1:]
+    if len(issue_lines) != total:
+        raise EngineError(
+            f"Pinned UVtools {UVTOOLS_VERSION} issue output is incomplete: declared {total} issues but emitted {len(issue_lines)} rows."
+        )
+
+    for line in issue_lines:
+        issue_type, separator, _ = line.partition(",")
+        if not separator or issue_type not in recognized_types:
+            raise EngineError(
+                f"Pinned UVtools {UVTOOLS_VERSION} emitted an unrecognized issue row; refusing to infer zero critical issues."
+            )
+        key = categories.get(issue_type)
+        if key is not None:
+            result[key] += 1
     return result
 
 
@@ -311,8 +338,8 @@ def slice_native(
             timeout=uvtools_timeout,
         )
         _require_uvtools_status(inspection, "issue inspection")
+        issues = parse_uvtools_issues(inspection.stdout)
         issue_text = inspection.stdout[-12000:]
-        issues = parse_uvtools_issues(issue_text)
         if reject_critical and critical_issue_count(issues) > 0:
             raise EngineError("UVtools found critical resin-print issues; human review/correction is required.")
 
