@@ -21,6 +21,7 @@ from app.placement import Envelope2D
 from app.plate import PrinterPlatePlan, plan_rectangular_instances
 from app.profiles import Profile
 from app.prusa_3mf_instances import Materialized3MFProject
+from app.uvtools_metrics import NativeArtifactMetrics, NativeBoundingRectangle
 
 
 SOURCE_SHA = "d" * 64
@@ -93,6 +94,22 @@ def _materialization(config_bytes: bytes) -> SelectedPlateProjectMaterialization
     )
 
 
+def _metrics() -> NativeArtifactMetrics:
+    return NativeArtifactMetrics(
+        layer_count=2,
+        max_layer_area_mm2=200,
+        material_volume_mm3=1.2,
+        footprint_area_mm2=400,
+        z_height_mm=0.1,
+        bounding_rectangle=NativeBoundingRectangle(
+            x_mm=20,
+            y_mm=20,
+            width_mm=20,
+            height_mm=20,
+        ),
+    )
+
+
 def test_selected_execution_passes_only_exact_bound_project_and_config(tmp_path, monkeypatch):
     config_bytes = b"exact selected effective config"
     materialization = _materialization(config_bytes)
@@ -120,6 +137,7 @@ def test_selected_execution_passes_only_exact_bound_project_and_config(tmp_path,
                 "empty_layers": 0,
             },
             issue_text="Issues: 0\n",
+            native_metrics=_metrics(),
             printer_profile_id=kwargs["printer"].id,
         )
 
@@ -143,6 +161,7 @@ def test_selected_execution_passes_only_exact_bound_project_and_config(tmp_path,
     assert captured["printer"] is printer
     assert result.materialized_project_sha256 == materialization.project.sha256
     assert result.artifact.native_bytes == b"plate ctb"
+    assert result.artifact.native_metrics.bounding_rectangle.width_mm == 20
     manifest = selected_materialized_plate_native_manifest(result)
     assert manifest["schema"] == "workpiece-resin-selected-plate-native-v1"
     assert manifest["plate_index"] == 1
