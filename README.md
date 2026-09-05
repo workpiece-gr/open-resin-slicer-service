@@ -8,9 +8,9 @@ The candidate direct-slice path retains:
 
 `immutable STL -> PrusaSlicer review project (.3mf) + exact effective config -> PrusaSlicer SLA slice (.sl1) -> UVtools conversion/inspection -> printer-native .ctb/.goo`
 
-The production-authority library path is stricter:
+The production-authority path is stricter:
 
-`immutable STL -> deterministic orientation screening -> exact sliced-finalist validation -> selected CTB-bound envelope -> deterministic physical plate plan -> exact per-plate 3MF build-item materialization -> verified per-instance 3MF evidence -> exact retained-config per-plate SL1/native slice -> UVtools whole-plate native envelope validation -> plate authority evidence -> selected order manifest`
+`immutable STL -> deterministic orientation screening -> exact sliced-finalist validation -> selected CTB-bound envelope -> deterministic physical plate plan -> exact per-plate 3MF build-item materialization -> verified per-instance 3MF evidence -> exact retained-config per-plate SL1/native slice -> UVtools whole-plate native envelope validation -> plate authority evidence -> selected order manifest -> deterministic multi-plate production ZIP`
 
 The review 3MF and exact effective config are retained together. Downstream SLA slicing uses that exact pair with `--dont-arrange`; it does not rebuild from STL, recenter the model, reapply orientation, or re-resolve profiles.
 
@@ -38,9 +38,11 @@ The first concrete resin profile is `elegoo-water-washable-grey`. At 0.05 mm it 
 ## Candidate vs production endpoints
 
 - `POST /v1/candidate` is the authenticated acceptance path. It accepts only explicitly approved candidate combinations and returns `X-Workpiece-Authority: acceptance-candidate-only`.
-- `POST /v1/project` is **reserved and fail-closed**. It currently returns HTTP 503 after authentication and does not slice the uploaded STL. The endpoint will remain closed until the selected-orientation/plate-authority pipeline is wired end-to-end through the HTTP service.
+- `POST /v1/project` is the authenticated selected production-authority path. It only succeeds for an exact printer/resin/quality tuple already approved for production, an immutable digest-pinned runtime toolchain, an automatically selected sliced-finalist orientation, and a complete authority proof for every physical plate.
 
-Adding a `production_ready` profile or a `production_combinations` entry is therefore not enough to expose a production HTTP path. The runtime must also be explicitly changed to execute and bind the complete plate-authority chain.
+The production endpoint rejects manual `rotate_x`, `rotate_y`, and `rotate_z` overrides. It accepts `requested_quantity` (bounded by `MAX_PRODUCTION_QUANTITY`, default 100) and `finalist_limit` (bounded by the proxy safety cap). If sliced finalist selection requires manual review, a profile/tuple is not production-ready, the toolchain receipt is missing/mutable, or any physical plate fails authority validation, the request fails closed.
+
+**The Mars 2 target is still candidate-only.** Its profile remains `production_ready=false`, its manufacturing/display mapping remains unverified, and `production_combinations` remains empty. Wiring `/v1/project` therefore does not authorize production on the Mars 2.
 
 ## Production plate authority contract
 
@@ -55,14 +57,28 @@ A production-authoritative physical plate requires all of the following before i
 7. pinned UVtools conversion, issue inspection and native metrics with zero critical resin issues;
 8. final whole-plate native bounds matching the expected materialized display envelope within the bounded raster tolerance;
 9. one complete `SelectedPlateAuthorityEvidence` object bound to the retained plate 3MF/SL1/native hashes and issue receipt;
-10. a selected order manifest containing complete authority evidence for every physical plate.
+10. a selected order manifest containing complete authority evidence for every physical plate plus an immutable digest-pinned toolchain execution-environment receipt.
 
-Creating those evidence objects does not enable a printer, deployment or production route by itself.
+## Production bundle
+
+`app.production_orchestration.execute_selected_production_order()` executes the complete source-bound production-evidence chain sequentially. `app.production_bundle.build_selected_production_bundle()` then hash-verifies and retains the exact production artifacts in one deterministic ZIP, including:
+
+- source STL;
+- proxy and sliced orientation evidence;
+- selected winner 3MF/effective config/SL1/native artifact;
+- every materialized physical-plate 3MF;
+- every per-plate SL1 and printer-native file;
+- per-plate UVtools issue reports;
+- selected order v4 manifest containing plate-authority evidence and immutable toolchain provenance.
+
+The runtime HTTP route can create this evidence-backed bundle, but no code in this repository automatically sends it to a printer or performs a deployment.
 
 ## Pinned engines
 
 - PrusaSlicer `2.9.6`, source commit `b028299c770b8380ee81c921a2867d522f288123`
 - UVtools `6.2.0`, Linux x64 ZIP SHA-256 `cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f`
+
+The production path additionally requires `WORKPIECE_RESIN_TOOLCHAIN_REF` to be an immutable GHCR image reference pinned by `sha256` digest. A mutable tag is rejected.
 
 ## API
 
@@ -71,11 +87,11 @@ Creating those evidence objects does not enable a printer, deployment or product
 - `GET /v1/profiles`
 - `POST /v1/orientation/proxy` — authenticated geometry-only orientation screening; never manufacturing authority
 - `POST /v1/candidate` — authenticated acceptance-only direct-slice bundle
-- `POST /v1/project` — authenticated reserved production endpoint; currently HTTP 503/fail-closed
+- `POST /v1/project` — authenticated evidence-backed selected production bundle
 
 POST endpoints require `WORKPIECE_RESIN_PROJECT_API_TOKEN`.
 
-`GET /health` exposes `production_http_endpoint_ready: false` while the production HTTP orchestration remains unwired.
+`GET /health` exposes `production_http_endpoint_ready: true` because the generic authority pipeline is wired. This flag does **not** mean a particular printer or resin tuple has been approved for production; profile/compatibility gates remain independent.
 
 ## Profile gate
 
@@ -87,7 +103,7 @@ A candidate slice requires:
 4. exact tuple in `candidate_combinations`;
 5. every referenced PrusaSlicer config file present.
 
-Profile metadata also supports an independent production-ready state, but profile readiness is only one prerequisite of the plate-authority contract above. It cannot open `/v1/project` on its own.
+A production request additionally requires the corresponding profiles to be `production_ready`, the exact tuple to exist in `production_combinations`, the printer's manufacturing/display mapping to be physically validated, and every selected plate to pass the complete authority chain above.
 
 There is no generic Elegoo fallback.
 
@@ -97,7 +113,7 @@ There is no generic Elegoo fallback.
 python -m pytest -q
 ```
 
-Unit tests mock the external slicers where appropriate. CI also contains pinned-toolchain/container acceptance coverage for the candidate service path.
+Unit tests mock the external slicers where appropriate. CI also contains pinned-toolchain/container acceptance coverage for the candidate service path; production authority is additionally covered at the coordinator, bundle and HTTP contract layers without promoting the Mars 2 tuple.
 
 ## Planned Mars 2 acceptance
 
