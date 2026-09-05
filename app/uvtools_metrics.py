@@ -7,14 +7,33 @@ from dataclasses import dataclass
 
 MAX_NATIVE_METRIC_LAYERS = 10_000
 _NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
-_RECTANGLE_RE = re.compile(
-    rf"Width\s*=\s*(?P<width>{_NUMBER}).*?Height\s*=\s*(?P<height>{_NUMBER})"
-)
 _LAYER_HEADER_RE = re.compile(r"^#\s*Layer:\s*(\d+)\s*$")
 
 
 class UVtoolsMetricError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class NativeBoundingRectangle:
+    """Whole-print cured-pixel envelope in UVtools native display millimeters."""
+
+    x_mm: float
+    y_mm: float
+    width_mm: float
+    height_mm: float
+
+    @property
+    def max_x_mm(self) -> float:
+        return round(self.x_mm + self.width_mm, 6)
+
+    @property
+    def max_y_mm(self) -> float:
+        return round(self.y_mm + self.height_mm, 6)
+
+    @property
+    def area_mm2(self) -> float:
+        return round(self.width_mm * self.height_mm, 6)
 
 
 @dataclass(frozen=True)
@@ -24,6 +43,7 @@ class NativeArtifactMetrics:
     material_volume_mm3: float
     footprint_area_mm2: float
     z_height_mm: float
+    bounding_rectangle: NativeBoundingRectangle
 
 
 def _finite_nonnegative(name: str, raw: str) -> float:
@@ -54,6 +74,37 @@ def _properties_before_layers(output: str) -> dict[str, str]:
     return result
 
 
+def _rectangle_component(raw: str, name: str) -> float:
+    matches = re.findall(rf"\b{re.escape(name)}\s*=\s*({_NUMBER})", raw)
+    if len(matches) != 1:
+        raise UVtoolsMetricError(
+            f"BoundingRectangleMillimeters must contain exactly one {name} value."
+        )
+    return _finite_nonnegative(f"BoundingRectangleMillimeters.{name}", matches[0])
+
+
+def parse_native_bounding_rectangle(output: str) -> NativeBoundingRectangle:
+    """Parse exact X/Y/Width/Height native-display bounds from pinned UVtools output."""
+    properties = _properties_before_layers(output)
+    raw = properties.get("BoundingRectangleMillimeters")
+    if raw is None:
+        raise UVtoolsMetricError(
+            "UVtools base properties are incomplete; missing: BoundingRectangleMillimeters."
+        )
+    x = _rectangle_component(raw, "X")
+    y = _rectangle_component(raw, "Y")
+    width = _rectangle_component(raw, "Width")
+    height = _rectangle_component(raw, "Height")
+    if width <= 0 or height <= 0:
+        raise UVtoolsMetricError("Native footprint width and height must be positive.")
+    return NativeBoundingRectangle(
+        x_mm=round(x, 6),
+        y_mm=round(y, 6),
+        width_mm=round(width, 6),
+        height_mm=round(height, 6),
+    )
+
+
 def parse_base_native_properties(output: str) -> tuple[int, float, float]:
     """Parse layer count, Z height and whole-print footprint area from UVtools output."""
     properties = _properties_before_layers(output)
@@ -76,14 +127,8 @@ def parse_base_native_properties(output: str) -> tuple[int, float, float]:
     if z_height <= 0:
         raise UVtoolsMetricError("PrintHeight must be positive for orientation validation.")
 
-    match = _RECTANGLE_RE.search(properties["BoundingRectangleMillimeters"])
-    if not match:
-        raise UVtoolsMetricError("BoundingRectangleMillimeters does not contain Width and Height.")
-    width = _finite_nonnegative("BoundingRectangleMillimeters.Width", match.group("width"))
-    depth = _finite_nonnegative("BoundingRectangleMillimeters.Height", match.group("height"))
-    if width <= 0 or depth <= 0:
-        raise UVtoolsMetricError("Native footprint width and height must be positive.")
-    return layer_count, z_height, width * depth
+    rectangle = parse_native_bounding_rectangle(output)
+    return layer_count, z_height, rectangle.area_mm2
 
 
 def parse_layer_native_properties(output: str, *, expected_layer_count: int) -> tuple[float, float]:
@@ -147,6 +192,7 @@ def parse_layer_native_properties(output: str, *, expected_layer_count: int) -> 
 
 def parse_native_artifact_metrics(base_output: str, layer_output: str) -> NativeArtifactMetrics:
     layer_count, z_height, footprint_area = parse_base_native_properties(base_output)
+    rectangle = parse_native_bounding_rectangle(base_output)
     max_area, material_volume = parse_layer_native_properties(
         layer_output, expected_layer_count=layer_count
     )
@@ -156,6 +202,7 @@ def parse_native_artifact_metrics(base_output: str, layer_output: str) -> Native
         material_volume_mm3=round(material_volume, 6),
         footprint_area_mm2=round(footprint_area, 6),
         z_height_mm=round(z_height, 6),
+        bounding_rectangle=rectangle,
     )
 
 

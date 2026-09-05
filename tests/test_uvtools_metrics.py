@@ -9,6 +9,7 @@ from app.uvtools_metrics import (
     parse_base_native_properties,
     parse_layer_native_properties,
     parse_native_artifact_metrics,
+    parse_native_bounding_rectangle,
 )
 
 
@@ -46,6 +47,10 @@ def test_parses_exact_native_metrics_from_base_and_layer_properties():
     assert metrics.material_volume_mm3 == 16.044
     assert metrics.footprint_area_mm2 == round(20.5 * 30.25, 6)
     assert metrics.z_height_mm == 0.15
+    assert metrics.bounding_rectangle.x_mm == 1.25
+    assert metrics.bounding_rectangle.y_mm == 2.5
+    assert metrics.bounding_rectangle.max_x_mm == 21.75
+    assert metrics.bounding_rectangle.max_y_mm == 32.75
 
 
 def test_base_parser_requires_complete_positive_geometry():
@@ -58,6 +63,20 @@ def test_base_parser_requires_complete_positive_geometry():
         parse_base_native_properties(BASE.replace("Width=20.5", "Width=0"))
     with pytest.raises(UVtoolsMetricError, match="finite"):
         parse_base_native_properties(BASE.replace("PrintHeight: 0.15", f"PrintHeight: {math.inf}"))
+
+
+def test_native_bounding_rectangle_requires_exact_complete_nonnegative_components():
+    rectangle = parse_native_bounding_rectangle(BASE)
+    assert rectangle.area_mm2 == round(20.5 * 30.25, 6)
+
+    with pytest.raises(UVtoolsMetricError, match="exactly one X"):
+        parse_native_bounding_rectangle(
+            BASE.replace("X=1.25", "X=1.25,X=2.0")
+        )
+    with pytest.raises(UVtoolsMetricError, match="non-negative"):
+        parse_native_bounding_rectangle(BASE.replace("Y=2.5", "Y=-0.1"))
+    with pytest.raises(UVtoolsMetricError, match="exactly one Height"):
+        parse_native_bounding_rectangle(BASE.replace(",Height=30.25", ""))
 
 
 def test_layer_parser_requires_exact_layer_coverage_and_properties():

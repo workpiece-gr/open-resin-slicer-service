@@ -15,6 +15,7 @@ from .engine import (
     Orientation,
     slice_native,
 )
+from .native_envelope import NativeEnvelopeEvidence, native_envelope_from_rectangle
 from .orientation_execute import (
     FinalistSliceResult,
     SlicedMeasurements,
@@ -43,6 +44,7 @@ class RealSlicedFinalistExecution:
 
     validation: SlicedOrientationValidation
     selected_result: FinalistSliceResult | None
+    selected_native_envelope: NativeEnvelopeEvidence | None
     executed_finalist_count: int
 
 
@@ -50,6 +52,7 @@ class RealSlicedFinalistExecution:
 class _SpooledFinalist:
     receipt: NativeArtifact
     measurements: SlicedMeasurements
+    native_envelope: NativeEnvelopeEvidence
     project_path: Path
     effective_config_path: Path
     intermediate_path: Path
@@ -212,6 +215,11 @@ def execute_real_sliced_finalists(
     lightweight hash/issue receipt while ranking continues. After sliced validation picks
     a winner, only that exact 3MF/effective-config/SL1/native chain is restored to memory.
 
+    The exact whole-print XY bounding rectangle from pinned UVtools is retained alongside
+    each receipt in UVtools native display millimetres. For the winner that rectangle is
+    exposed as CTB-hash-bound evidence only; it does not map or authorize the conservative
+    manufacturing envelope.
+
     Critical UVtools findings are deliberately *not* rejected inside ``slice_native``:
     they must enter sliced-finalist validation so one blocked orientation does not abort
     evaluation of other finalists. Production authority is not granted by this adapter.
@@ -272,10 +280,16 @@ def execute_real_sliced_finalists(
                 footprint_area_mm2=metrics.footprint_area_mm2,
                 z_height_mm=metrics.z_height_mm,
             )
+            native_envelope = native_envelope_from_rectangle(
+                printer_profile_id=printer.id,
+                printer_native_sha256=artifact.native_sha256,
+                rectangle=metrics.bounding_rectangle,
+            )
             receipt = _artifact_receipt(artifact)
             spooled[key] = _SpooledFinalist(
                 receipt=receipt,
                 measurements=measurements,
+                native_envelope=native_envelope,
                 project_path=project_path,
                 effective_config_path=config_path,
                 intermediate_path=intermediate_path,
@@ -297,6 +311,7 @@ def execute_real_sliced_finalists(
             return RealSlicedFinalistExecution(
                 validation=execution.validation,
                 selected_result=None,
+                selected_native_envelope=None,
                 executed_finalist_count=len(spooled),
             )
 
@@ -305,6 +320,10 @@ def execute_real_sliced_finalists(
             raise SlicedFinalistAdapterError(
                 "Selected sliced evidence has no matching spooled exact artifact."
             )
+        if selected.native_sha256 != selected_item.native_envelope.printer_native_sha256:
+            raise SlicedFinalistAdapterError(
+                "Selected native envelope is not bound to the exact selected printer-native artifact hash."
+            )
         selected_artifact = _restore_spooled_artifact(selected_item)
         return RealSlicedFinalistExecution(
             validation=execution.validation,
@@ -312,5 +331,6 @@ def execute_real_sliced_finalists(
                 artifact=selected_artifact,
                 measurements=selected_item.measurements,
             ),
+            selected_native_envelope=selected_item.native_envelope,
             executed_finalist_count=len(spooled),
         )
