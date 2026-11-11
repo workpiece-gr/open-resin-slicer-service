@@ -63,7 +63,8 @@ The HTTP service exposes:
 
 - `/v1/orientation/proxy` for geometry-only orientation screening;
 - `/v1/candidate` for the non-authoritative direct acceptance bundle;
-- `/v1/project` for the complete selected production-authority coordinator + deterministic multi-plate bundle.
+- `/v1/project` for the complete selected production-authority coordinator + deterministic multi-plate bundle;
+- `/v1/estimate` for lean per-part measurements (layers, volumes, formula print time, UVtools issues) that the website turns into a price. It reuses the same engine, validators and metric parsers, accepts a proposed orientation, retains no artifact and carries no authority.
 
 `/v1/project` remains fail-closed at every prerequisite. It requires authentication, a digest-pinned immutable toolchain runtime receipt, an exact production-approved printer/resin/quality tuple, bounded quantity/finalist inputs, automatic sliced-finalist selection, validated manufacturing/display mapping, and complete plate authority for every generated physical plate. Any missing prerequisite or manual-review outcome prevents a production bundle.
 

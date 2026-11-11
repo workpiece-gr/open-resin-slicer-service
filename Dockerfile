@@ -7,6 +7,10 @@
 ARG TOOLCHAIN_IMAGE=workpiece-resin-toolchain:local
 FROM ${TOOLCHAIN_IMAGE}
 
+# Optional: pass --build-arg SERVICE_COMMIT=$(git rev-parse HEAD) so /v1/estimate reports it.
+ARG SERVICE_COMMIT=
+ENV WORKPIECE_RESIN_SERVICE_COMMIT=${SERVICE_COMMIT}
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PROFILE_ROOT=/app/profiles \
