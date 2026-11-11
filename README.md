@@ -88,8 +88,19 @@ The production path additionally requires `WORKPIECE_RESIN_TOOLCHAIN_REF` to be 
 - `POST /v1/orientation/proxy` — authenticated geometry-only orientation screening; never manufacturing authority
 - `POST /v1/candidate` — authenticated acceptance-only direct-slice bundle
 - `POST /v1/project` — authenticated evidence-backed selected production bundle
+- `POST /v1/estimate` — authenticated lean per-part measurements for instant quotes (JSON, no artifacts)
 
 POST endpoints require `WORKPIECE_RESIN_PROJECT_API_TOKEN`.
+
+### Estimate endpoint
+
+`POST /v1/estimate` exists so the website can price a part from real slice numbers. It never prices and never grants authority. Multipart fields: `file` (STL, same 30 MB limit and structural validation as the other routes), `printer_profile`, `resin_profile`, `quality` (must be an approved candidate tuple), optional `rotate_x`/`rotate_y`/`rotate_z` degrees (a proposed orientation; `/v1/project` still refuses manual orientation).
+
+It runs the same pinned `slice_native()` chain (review 3MF + effective config -> SL1 -> UVtools CTB + issue inspection), then measures the native file with pinned UVtools (`LayerCount`, `PrintHeight`, bounding rectangle, per-layer cured volume) and discards every artifact. Response JSON: `engine` (PrusaSlicer/UVtools versions, toolchain digest and `WORKPIECE_RESIN_SERVICE_COMMIT` when set), `profile` (tuple, `layerHeightMm`, exposure and motion values actually used), `summary` (`layer_count`, `bottom_layer_count` = PrusaSlicer `faded_layers`, `print_time_seconds`, `model_volume_ml`, `support_volume_ml`, `total_resin_ml`, `bounding_box_mm` of the oriented model, `print_footprint_mm` of the supported print, `fits_envelope`, `orientation_deg`), `issues` (UVtools categories), `warnings`, `hashes`.
+
+Numbers: `model_volume_ml` is the closed-mesh integral of the STL; `total_resin_ml` is the UVtools sum of cured layer volumes; `support_volume_ml` is their difference and includes the pad. `print_time_seconds = bottom_layers x (initial_exposure + lift + retract + rest) + remaining_layers x (exposure + lift + retract + rest)` using the exposure values from the exact effective config and the resin profile's `motion_contract`; no fixed job overhead is added. The exposure values are still calibration seeds, so the website must treat the time as an estimate.
+
+Errors return `{"detail": {"code", "message"}}` with codes `INVALID_STL` (400/413/422), `UNSUPPORTED_PROFILE` (422), `INVALID_ORIENTATION` (422), `OUTSIDE_ENVELOPE` (422, the bare oriented model exceeds the 80 x 129 x 150 mm envelope so nothing is sliced), `SLICE_FAILED` (422), `SLICE_TIMEOUT` (504) and `BUSY` (429 with `Retry-After`). A supported print that only exceeds the envelope because of supports/pad still returns 200 with `fits_envelope: false`. The route shares the single slice slot with the other POST routes and waits up to `ESTIMATE_QUEUE_TIMEOUT_SECONDS` (default 60) for it; callers should allow at least `SLICE_TIMEOUT_SECONDS + UVTOOLS_TIMEOUT_SECONDS + queue` end to end.
 
 `GET /health` exposes `production_http_endpoint_ready: true` because the generic authority pipeline is wired. This flag does **not** mean a particular printer or resin tuple has been approved for production; profile/compatibility gates remain independent.
 
@@ -113,7 +124,7 @@ There is no generic Elegoo fallback.
 python -m pytest -q
 ```
 
-Unit tests mock the external slicers where appropriate. CI also contains pinned-toolchain/container acceptance coverage for the candidate service path; production authority is additionally covered at the coordinator, bundle and HTTP contract layers without promoting the Mars 2 tuple.
+Unit tests mock the external slicers where appropriate. With the pinned toolchain installed locally, `WORKPIECE_RESIN_INTEGRATION=1 python -m pytest -q tests/test_estimate.py` additionally slices a real 20 mm cube through `/v1/estimate`. CI also contains pinned-toolchain/container acceptance coverage for the candidate service path; production authority is additionally covered at the coordinator, bundle and HTTP contract layers without promoting the Mars 2 tuple.
 
 ## Planned Mars 2 acceptance
 

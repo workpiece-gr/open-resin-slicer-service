@@ -20,6 +20,13 @@ from .engine import (
     compact_metadata,
     slice_native,
 )
+from .estimate import (
+    EstimateError,
+    build_estimate,
+    engine_failure,
+    measure_native,
+    prepare_estimate,
+)
 from .orientation import OrientationPlanError
 from .orientation_pipeline import build_proxy_orientation_plan, proxy_orientation_plan_manifest
 from .orientation_proxy import OrientationProxyError
@@ -47,6 +54,9 @@ UVTOOLS_CMD = os.environ.get("UVTOOLS_CMD", "/opt/uvtools/UVtoolsCmd")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(30 * 1024 * 1024)))
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "240"))
 UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
+# /v1/estimate shares the single slice slot but may queue behind a running slice.
+ESTIMATE_QUEUE_TIMEOUT = float(os.environ.get("ESTIMATE_QUEUE_TIMEOUT_SECONDS", "60"))
+SERVICE_COMMIT = os.environ.get("WORKPIECE_RESIN_SERVICE_COMMIT", "")
 
 
 def _bounded_concurrency(name: str, default: int) -> int:
@@ -326,6 +336,79 @@ async def candidate(
         rotate_z=rotate_z,
         authorization=authorization,
     )
+
+
+@app.post("/v1/estimate")
+async def estimate(
+    file: UploadFile = File(...),
+    printer_profile: str = Form(...),
+    resin_profile: str = Form(...),
+    quality: str = Form(...),
+    rotate_x: float = Form(0.0),
+    rotate_y: float = Form(0.0),
+    rotate_z: float = Form(0.0),
+    authorization: str | None = Header(default=None),
+) -> JSONResponse:
+    """Lean per-part measurements for instant quotes: no price, no retained artifacts, no authority."""
+    _authorize(authorization)
+    try:
+        filename, data = await _read_stl_upload(file)
+    except HTTPException as exc:
+        raise EstimateError("INVALID_STL", str(exc.detail), status=exc.status_code).http() from exc
+    try:
+        prepared = await run_in_threadpool(
+            prepare_estimate,
+            data,
+            registry=_registry_snapshot(),
+            printer_id=printer_profile,
+            resin_id=resin_profile,
+            quality_id=quality,
+            orientation=Orientation(rotate_x, rotate_y, rotate_z),
+        )
+    except EstimateError as exc:
+        raise exc.http() from exc
+
+    try:
+        await asyncio.wait_for(SLICE_CAPACITY.acquire(), timeout=ESTIMATE_QUEUE_TIMEOUT)
+    except TimeoutError as exc:
+        raise EstimateError("BUSY", "Resin slicing capacity is busy; retry shortly.", status=429).http(
+            {"Retry-After": "30"}
+        ) from exc
+    try:
+        try:
+            artifact = await run_in_threadpool(
+                slice_native,
+                data,
+                original_name=filename,
+                printer=prepared.printer,
+                resin=prepared.resin,
+                quality=prepared.quality,
+                orientation=prepared.orientation,
+                prusa_bin=PRUSA_BIN,
+                uvtools_cmd=UVTOOLS_CMD,
+                slice_timeout=SLICE_TIMEOUT,
+                uvtools_timeout=UVTOOLS_TIMEOUT,
+                reject_critical=False,
+            )
+            metrics = await run_in_threadpool(
+                measure_native, artifact, uvtools_cmd=UVTOOLS_CMD, uvtools_timeout=UVTOOLS_TIMEOUT
+            )
+        except RuntimeError as exc:  # EngineError / SlicedFinalistAdapterError
+            raise engine_failure(exc).http() from exc
+    finally:
+        SLICE_CAPACITY.release()
+
+    try:
+        payload = build_estimate(
+            prepared,
+            artifact,
+            metrics,
+            toolchain_image_ref=_toolchain_health().get("toolchain_image_ref"),
+            service_commit=SERVICE_COMMIT,
+        )
+    except EstimateError as exc:
+        raise exc.http() from exc
+    return JSONResponse(content=payload, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/v1/project")
