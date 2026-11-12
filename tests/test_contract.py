@@ -70,11 +70,11 @@ def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
     assert "sha256sum -c" in toolchain_dockerfile
 
 
-def test_production_http_contract_uses_selected_authority_pipeline_without_promoting_mars2():
+def test_project_route_uses_candidate_tuple_without_authority_gates():
     root = Path(__file__).parents[1]
     main_source = (root / "app/main.py").read_text("utf-8")
-    assert "execute_selected_production_order" in main_source
-    assert "build_selected_production_bundle" in main_source
-    assert '"production_http_endpoint_ready": True' in main_source
-    assert "resolve_production" not in main_source
-    assert "manual rotate_x/rotate_y/rotate_z overrides are not accepted" in main_source
+    project_source = (root / "app/project.py").read_text("utf-8")
+    assert "build_order_project" in main_source
+    assert "resolve_candidate" in project_source
+    assert "resolve_production" not in main_source and "resolve_production" not in project_source
+    assert "toolchain" not in main_source.lower()

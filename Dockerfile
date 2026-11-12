@@ -1,9 +1,8 @@
 # syntax=docker/dockerfile:1.7
 
 # Normal Workpiece resin-service builds never compile PrusaSlicer.
-# CI/production must supply an immutable TOOLCHAIN_IMAGE reference from
-# toolchain.lock.json (image@sha256:...). The local tag is only for developers
-# who explicitly build Dockerfile.toolchain themselves.
+# Build Dockerfile.toolchain once (PrusaSlicer 2.9.6 + UVtools 6.2.0, 1-2 h) and pass its
+# image as TOOLCHAIN_IMAGE; the host records that image id in its images lock.
 ARG TOOLCHAIN_IMAGE=workpiece-resin-toolchain:local
 FROM ${TOOLCHAIN_IMAGE}
 
@@ -29,6 +28,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 COPY profiles ./profiles
+COPY scripts ./scripts
 COPY NOTICE LICENSE README.md ./
 
 RUN useradd --create-home --uid 10001 slicer \

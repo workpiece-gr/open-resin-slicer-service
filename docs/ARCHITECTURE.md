@@ -2,100 +2,51 @@
 
 ## Isolation boundary
 
-The FDM OrcaSlicer service is already part of the Workpiece production-authority chain. Resin remains under controlled development. The resin stack therefore has its own container, deployment domain, bearer token, resource limits and profile set. Failure or dependency upgrades in resin must not alter FDM behavior.
+The FDM OrcaSlicer service serves the live site. Resin has its own container, port, bearer token, resource limits and profile set, so a resin failure or dependency upgrade cannot alter FDM behaviour.
 
 ## Why PrusaSlicer + UVtools
 
-PrusaSlicer provides the pinned SLA/MSLA slicing pipeline and retained 3MF/effective-config recipe. UVtools is the explicit native conversion, issue-inspection and final native-metrics layer for CTB/GOO outputs.
+PrusaSlicer provides the pinned SLA/MSLA slicer, SLA supports and the editable 3MF project the workshop reviews. UVtools converts the SL1 archive to the printer-native CTB, reports print issues and measures the native file (layer count, cured volume, bounding rectangle, height). Neither tool is modified; `Dockerfile.toolchain` builds both from pinned sources.
 
-The authoritative downstream slice rule is: once a selected review 3MF and effective config exist, plate slicing uses that exact pair with `--dont-arrange`. It must not rebuild from STL, recenter, reapply orientation or resolve a different profile recipe.
+The CLI does not embed the print config in an exported 3MF, so every slice keeps the review 3MF and the effective config together, and every later slice loads that exact pair with `--dont-arrange`.
 
-## Orientation and selected-winner boundary
+## Two entry points
 
-Workpiece does not claim that stock PrusaSlicer CLI performs automatic resin orientation.
+| | `/v1/estimate` | `/v1/project` |
+|---|---|---|
+| when | instant quote, per part | after an order, per ordered part |
+| orientation | caller's proposal (default none) | automatic |
+| slices | 1 | `finalist_limit` + plates |
+| output | JSON measurements | ZIP: per-plate 3MF + CTB, effective config, `project.json` |
+| caller waits | seconds to a few minutes | a background job; tens of minutes |
 
-The implemented server-side path instead separates orientation into independently testable stages:
+Both share `engine.slice_native`, `stl.validate_stl_bytes`, `profiles.ProfileRegistry`, `uvtools_metrics` and the print-time formula in `estimate.py`, so the quote and the order project report the same time for the same layer count.
 
-1. deterministic geometry-proxy candidate generation/screening;
-2. real pinned-engine slicing of only the proxy finalists;
-3. exact CTB/native measurements and critical-issue evidence for each finalist;
-4. deterministic ranking of sliced evidence;
-5. one selected winner whose review 3MF, effective config, SL1, native file and native display envelope remain SHA-bound.
+## Order project pipeline (`app/project.py`)
 
-A proxy score never grants manufacturing authority. If all sliced finalists are blocked, the result requires manual review rather than silently choosing one. The production HTTP route accepts no manual X/Y/Z rotation override; it uses this exact sliced-evidence selection path.
+1. **Prepare** (cheap, before the slice slot): STL structure, profile tuple from `profiles/compatibility.json`, manufacturing envelope and bed size from the printer profile.
+2. **Orientation** (`orientation_pipeline`, `orientation_adapter`): proxy screening of ~30 rotations on the mesh alone, then real slices of the finalists ranked on UVtools metrics. Critical UVtools findings are hard blockers in ranking; one blocked orientation does not abort the others. If all are blocked, the best proxy orientation is used with a warning in `project.json` — the reviewer decides.
+3. **Plate plan** (`plate.plan_printer_profile_instances`): deterministic row-major grid of the winner's supported/padded footprint on the 80 x 129 mm envelope, 5 mm spacing, 3 mm margin, common 90 degree rotation when it increases capacity.
+4. **Materialize** (`prusa_3mf_instances.materialize_prusa_project_instances`): clone the winner's single build item once per instance; object geometry, resolved metadata and SLA support points are copied unchanged, so all instances share the winner's supports.
+5. **Slice each plate** (`materialized_plate_slice.slice_materialized_plate_native`): PrusaSlicer with the retained config and `--dont-arrange`, UVtools convert, `print-issues` and metrics. Critical issues are reported per plate, not refused.
+6. **ZIP + `project.json`** with the SHA-256 of every file it contains.
 
-## Physical plate/materialization boundary
+## Coordinates
 
-Packing occurs in Workpiece manufacturing-envelope coordinates, not assumed slicer display coordinates.
+Plate positions are PrusaSlicer bed millimetres (lower-left origin, `bed_shape` 82.62 x 130.56). The 80 x 129 mm envelope is centred in the bed (offset 1.31 / 0.78 mm). The winner's review 3MF was exported with `--center` at the bed centre; the supported footprint's width and depth come from UVtools, and its centre is assumed to coincide with the model centre. The CTB raster is a mirrored image of the bed (`display_mirror_x = 1`), and which axis UVtools' rectangle origin mirrors has not been measured, so `project.json` records the planned positions and each plate's observed CTB rectangle, and `scripts/calibrate_mars2_mapping.py` compares them under the four mirror hypotheses. The reviewer sees the real layout in PrusaSlicer either way.
 
-A printer whose manufacturing mapping is `validated` must carry an explicit rigid `manufacturing_to_display_transform`. The transform is schema-checked, must preserve millimetre scale, may swap/reflect axes, and must map the complete manufacturing envelope inside the physical display. The exact transform used during planning is retained with the selected plan so later profile drift invalidates materialization.
+## Concurrency and limits
 
-The selected single-instance CTB bounding rectangle is retained in native display millimetres. With a validated transform it is mapped conservatively to manufacturing-axis bounds for packing. Planned manufacturing centers are then mapped back to display-space 3MF build-item placements.
+One slice slot (`MAX_CONCURRENT_SLICES`, 1–4) is shared by `/v1/candidate`, `/v1/estimate` and `/v1/project`; `/v1/orientation/proxy` has its own CPU slot. Estimates wait up to 60 s for the slot and then answer `BUSY`; projects wait up to 600 s. Each external process is bounded by `SLICE_TIMEOUT_SECONDS` / `UVTOOLS_TIMEOUT_SECONDS`. Uploads are capped by `MAX_UPLOAD_BYTES`; proxy screening by a triangle/layer work budget; quantities by `MAX_PROJECT_QUANTITY`.
 
-The deterministic materializer clones the selected Prusa build item only. The selected 3MF object geometry, resolved metadata and SLA support-point metadata are preserved. Authority evidence later reconstructs the full materialized 3MF from the exact selected source project + exact source CTB envelope + retained placements and requires byte-for-byte equality before parsing the final build-item transforms back.
+## Profiles
 
-## Per-instance and final-native validation
+`profiles/printers`, `profiles/resins`, `profiles/quality` hold PrusaSlicer `.ini` files with a JSON sidecar (ids, display geometry, envelope, motion values). A tuple must appear in `compatibility.json` to be sliced. The registry also understands an optional `manufacturing_envelope_coordinate_mapping: validated` + rigid `manufacturing_to_display_transform` on a printer (`coordinate_mapping.py`); the project path does not need it, and no profile sets it today.
 
-Two independent physical-output proofs are required:
+## Mars 2 status
 
-1. **Per-instance 3MF proof.** Every materialized build item is parsed back from the exact SHA-bound 3MF and must match the deterministic reconstruction. Per-instance supported/padded envelopes are derived from the exact selected single-instance CTB envelope through those verified placements, mapped back to manufacturing coordinates and checked against planned slots, margins and spacing. This is explicitly a transform proof, not falsely described as geometry re-extraction.
-2. **Whole-plate native proof.** The exact materialized 3MF is sliced with the selected effective config, converted/inspected by pinned UVtools, and its final native whole-print bounding rectangle must match the expected union of materialized display envelopes within the bounded physical-pixel raster tolerance.
-
-The final native issue receipt must contain the exact expected pinned UVtools categories, and production plate authority requires zero critical resin issues.
-
-## Plate and order authority
-
-`SelectedPlateAuthorityEvidence` joins the selected sliced-winner chain, verified per-instance materialized-3MF evidence, exact materialized-plate native execution, final whole-plate UVtools evidence and retained final file hashes. It also requires the printer profile itself already be explicitly production-ready.
-
-A `production-authoritative` selected order requires one matching plate-authority object for every physical plate. The order binds its retained 3MF, SL1, native hashes and issue receipt back to those authority objects and additionally requires a carried immutable digest-pinned toolchain execution-environment record.
-
-These evidence objects establish artifact authority; they do not change profile readiness, publish a toolchain image, deploy a service, or send a job to a printer.
-
-## Production orchestration and bundle boundary
-
-`app.production_orchestration.execute_selected_production_order()` composes the validated library stages into one bounded server-side production-evidence run. It requires the production profile tuple and a digest-pinned `WORKPIECE_RESIN_TOOLCHAIN_REF` before finalist slicing, blocks on manual-review orientation outcomes, executes physical plates sequentially, requires full plate authority for every plate, and emits the selected order v4 manifest with the validated execution-environment receipt.
-
-`app.production_bundle.build_selected_production_bundle()` then verifies every retained source/selected/plate payload against those receipts and creates one deterministic multi-plate ZIP containing the source STL, proxy/sliced orientation evidence, exact selected winner recipe/artifacts, every materialized 3MF/SL1/native file, per-plate UVtools reports, and the authority manifest.
-
-## HTTP boundary
-
-The HTTP service exposes:
-
-- `/v1/orientation/proxy` for geometry-only orientation screening;
-- `/v1/candidate` for the non-authoritative direct acceptance bundle;
-- `/v1/project` for the complete selected production-authority coordinator + deterministic multi-plate bundle;
-- `/v1/estimate` for lean per-part measurements (layers, volumes, formula print time, UVtools issues) that the website turns into a price. It reuses the same engine, validators and metric parsers, accepts a proposed orientation, retains no artifact and carries no authority.
-
-`/v1/project` remains fail-closed at every prerequisite. It requires authentication, a digest-pinned immutable toolchain runtime receipt, an exact production-approved printer/resin/quality tuple, bounded quantity/finalist inputs, automatic sliced-finalist selection, validated manufacturing/display mapping, and complete plate authority for every generated physical plate. Any missing prerequisite or manual-review outcome prevents a production bundle.
-
-Wiring the generic route does not approve the Mars 2. Its current profile remains candidate-only and its production compatibility list remains empty, so it cannot enter the production coordinator.
-
-## Printer/resin validation gates
-
-A production-ready machine profile requires at minimum:
-
-1. exact build volume/manufacturing envelope;
-2. exact LCD physical dimensions and pixel resolution;
-3. physically validated manufacturing-to-display origin/axis/mirror behavior;
-4. native target format/version;
-5. confirmed lift/retract capabilities;
-6. a known-good calibration/native file opened on the physical printer.
-
-A production-ready resin profile requires exposure calibration on that exact printer/resin combination. Published/community values are starting points, not Workpiece authority.
-
-## Mars 2 acceptance plan
-
-1. Build the pinned container and verify `/health` identifies both engines.
-2. Keep the Mars 2 profile candidate-only while its physical manufacturing/display mapping is unverified.
-3. Slice deterministic calibration geometry through the candidate path.
-4. Open generated native files in UVtools and the printer/vendor viewer where available.
-5. Compare layer count, dimensions, mirroring, exposure and lift/retract values.
-6. Establish the physical manufacturing-to-display transform from controlled test evidence; do not infer it from nominal display dimensions.
-7. Run dry printer load checks where safe/supported.
-8. Print calibration pieces and measure XY/Z dimensions.
-9. Calibrate exposure and supports for the exact resin.
-10. Only after those gates pass may the Mars 2 printer/resin/quality tuple be considered for production-ready profile promotion.
+Profile seeded from ELEGOO's spec and UVtools' Mars 2 Pro profile; exposure values are manufacturer midpoints. Still to do on the real machine: build the toolchain image on the host, run one project, measure the bed-to-CTB mapping with the calibration script, print a calibration piece, calibrate exposure. `docs/MARS2_ACCEPTANCE.md` has the sequence.
 
 ## Website integration
 
-The website should call this service server-to-server, never directly from anonymous browser JavaScript. Workpiece should store immutable source and selected-order manifests plus the exact retained per-plate 3MF/SL1/native artifacts and their evidence. A human workshop acknowledgment can remain an additional operational gate during controlled launch.
+Server to server only, never from browser JavaScript. The website stores the estimate JSON with the quote and the project ZIP with the order; the workshop downloads the ZIP, opens each plate 3MF in PrusaSlicer, reviews or edits it, and prints the CTB (or re-slices after editing). Nothing in this repository sends a job to a printer.
