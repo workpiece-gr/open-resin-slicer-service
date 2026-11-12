@@ -189,6 +189,11 @@ def slice_materialized_plate_native(
             raise MaterializedPlateSliceError(
                 f"PrusaSlicer SLA export from exact materialized plate failed: {sliced.stdout[-2000:]}"
             )
+        if "Nothing to print" in sliced.stdout:
+            raise MaterializedPlateSliceError(
+                "PrusaSlicer reports nothing to print: the plate is empty or an object is not fully inside the print volume. "
+                f"PrusaSlicer output: {sliced.stdout[-500:]}"
+            )
         if not intermediate_path.is_file() or intermediate_path.stat().st_size == 0:
             candidates = list(root.glob("*.sl1")) + list(root.glob("*.sl1s"))
             if len(candidates) == 1:

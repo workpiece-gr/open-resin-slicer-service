@@ -18,9 +18,9 @@ MODEL = "3D/3dmodel.model"
 SOURCE_TRANSFORM = "1 0 0 0 1 0 0 0 1 100 200 5"
 
 
-def _project(*, build_items: int = 1) -> bytes:
+def _project(*, build_items: int = 1, transform: str = SOURCE_TRANSFORM) -> bytes:
     items = "\n".join(
-        f'  <item objectid="1" transform="{SOURCE_TRANSFORM}" printable="1"/>'
+        f'  <item objectid="1" transform="{transform}" printable="1"/>'
         for _ in range(build_items)
     )
     model = (
