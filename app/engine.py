@@ -16,10 +16,17 @@ from typing import Sequence
 
 from .profiles import Profile
 
-PRUSA_SLICER_VERSION = "2.9.6"
-PRUSA_SLICER_COMMIT = "b028299c770b8380ee81c921a2867d522f288123"
-UVTOOLS_VERSION = "6.2.0"
-UVTOOLS_SUCCESS_EXIT = 1  # pinned UVtools 6.2.0 Program.Main returns 1 after normal commands
+PRUSA_SLICER_VERSION = "2.9.7"
+PRUSA_SLICER_COMMIT = "450d70dd81c9b8990bc6bc8e690e31f82ddceb11"
+UVTOOLS_VERSION = "7.1.2"
+# UVtools 7.0.0 fixed "UVtoolsCmd: it always return 1 exit code"; 7.x exits 0 after a normal
+# command, 1 on a parse/usage error and 255 (-1) on a runtime error.
+UVTOOLS_SUCCESS_EXIT = 0
+# UVtools 7 refuses bare extensions shared by several encoders ("ctb" is Chitubox and
+# CTBEncrypted; "goo" is Goo and GooV5). Printer profiles must therefore declare
+# uvtools_target as "auto" (FILEFORMAT_xxx/FILEVERSION_x from printer_notes) or a strict
+# encoder name such as "Chitubox".
+AMBIGUOUS_UVTOOLS_EXTENSIONS = frozenset({"ctb", "goo"})
 
 
 class EngineError(RuntimeError):
@@ -90,6 +97,46 @@ def _run(command: Sequence[str], *, timeout: int) -> subprocess.CompletedProcess
         )
     except subprocess.TimeoutExpired as exc:
         raise EngineError(f"External resin engine timed out after {timeout} seconds.") from exc
+
+
+def uvtools_command(uvtools_cmd: str, subcommand: str, *args: str) -> list[str]:
+    """Build a pinned UVtoolsCmd invocation.
+
+    UVtools 7 (System.CommandLine 2.0) only accepts the global ``--no-progress`` option
+    before the subcommand; ``print-issues <file> --no-progress`` is rejected as an
+    unrecognized argument.
+    """
+    return [uvtools_cmd, "--no-progress", subcommand, *args]
+
+
+def resolve_uvtools_target(printer: Profile, *, error: type[Exception] = EngineError) -> tuple[str, str]:
+    """Return ``(native_format, uvtools_target)`` from printer metadata or fail closed."""
+    native_format = str(printer.metadata.get("native_format", "")).lower().lstrip(".")
+    if native_format not in {"ctb", "goo"}:
+        raise error("Printer profile must declare a validated CTB or GOO native format in the initial service.")
+    uvtools_target = str(printer.metadata.get("uvtools_target") or "").strip()
+    if not uvtools_target:
+        raise error(
+            "Printer profile has no UVtools conversion target; declare uvtools_target as 'auto' "
+            "or a strict UVtools encoder name (for example 'Chitubox')."
+        )
+    if uvtools_target.lower().lstrip(".") in AMBIGUOUS_UVTOOLS_EXTENSIONS:
+        raise error(
+            f"Printer profile uvtools_target {uvtools_target!r} is a bare extension shared by several "
+            f"UVtools {UVTOOLS_VERSION} encoders; use 'auto' or a strict encoder name."
+        )
+    return native_format, uvtools_target
+
+
+def uvtools_native_output_path(intermediate_path: Path, native_format: str) -> Path:
+    """Where UVtools writes the converted file.
+
+    With target ``auto`` UVtools 7 ignores the output-file argument and writes
+    ``<input stem>.<FILEFORMAT ext>`` next to the input; with a strict encoder name it
+    honours the argument. Deriving the native path from the intermediate path keeps both
+    cases on the same file.
+    """
+    return intermediate_path.with_name(f"{intermediate_path.stem}.{native_format}")
 
 
 def _profile_args(printer: Profile, resin: Profile, quality: Profile) -> list[str]:
@@ -189,10 +236,10 @@ def build_prusa_command(
 
 
 def parse_uvtools_issues(text: str) -> dict[str, int]:
-    """Parse the exact pinned UVtools 6.2.0 ``print-issues`` text contract.
+    """Parse the exact pinned UVtools ``print-issues`` text contract.
 
-    UVtools 6.2.0 prints one ``Issues: N`` header followed by exactly N issue rows
-    whose first CSV field is the ``MainIssue.IssueType`` enum value. Production must
+    UVtools 7.1.2 (unchanged since 6.x) prints one ``Issues: N`` header followed by
+    exactly N issue rows whose first CSV field is the ``MainIssue.IssueType`` enum value. Production must
     never interpret an absent/changed format as zero issues, so any mismatch fails
     closed instead of returning a best-effort count.
     """
@@ -263,12 +310,7 @@ def slice_native(
     uvtools_timeout: int,
     reject_critical: bool,
 ) -> NativeArtifact:
-    native_format = str(printer.metadata.get("native_format", "")).lower().lstrip(".")
-    uvtools_target = str(printer.metadata.get("uvtools_target") or native_format).strip()
-    if native_format not in {"ctb", "goo"}:
-        raise EngineError("Printer profile must declare a validated CTB or GOO native format in the initial service.")
-    if not uvtools_target:
-        raise EngineError("Printer profile has no UVtools conversion target.")
+    native_format, uvtools_target = resolve_uvtools_target(printer)
     if not shutil.which(prusa_bin) and not Path(prusa_bin).is_file():
         raise EngineError("Pinned PrusaSlicer binary is unavailable.")
     if not shutil.which(uvtools_cmd) and not Path(uvtools_cmd).is_file():
@@ -283,7 +325,6 @@ def slice_native(
         project_path = root / "review.3mf"
         effective_config_path = root / "effective.ini"
         intermediate_path = root / "production.sl1"
-        native_path = root / f"production.{native_format}"
         input_path.write_bytes(source)
 
         project = _run(
@@ -325,8 +366,9 @@ def slice_native(
             else:
                 raise EngineError("PrusaSlicer did not produce the expected SLA archive from the retained recipe.")
 
+        native_path = uvtools_native_output_path(intermediate_path, native_format)
         conversion = _run(
-            [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
+            uvtools_command(uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)),
             timeout=uvtools_timeout,
         )
         _require_uvtools_status(conversion, "conversion")
@@ -334,7 +376,7 @@ def slice_native(
             raise EngineError("Pinned UVtools reported normal completion but produced no native artifact.")
 
         inspection = _run(
-            [uvtools_cmd, "print-issues", str(native_path), "--no-progress"],
+            uvtools_command(uvtools_cmd, "print-issues", str(native_path)),
             timeout=uvtools_timeout,
         )
         _require_uvtools_status(inspection, "issue inspection")
@@ -423,7 +465,7 @@ def artifact_manifest(
         },
         "issues": artifact.issue_summary,
         "recipe_rule": (
-            "Pinned PrusaSlicer CLI 2.9.6 does not embed print configuration in --export-3mf output; "
+            "Pinned PrusaSlicer CLI 2.9.7 does not embed print configuration in --export-3mf output; "
             "the review 3MF and effective config are therefore one indivisible retained recipe."
         ),
         "review_rule": (

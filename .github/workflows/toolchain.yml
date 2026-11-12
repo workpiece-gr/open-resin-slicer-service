@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: resin-toolchain-prusa-2.9.6-uvtools-6.2.0
+  group: resin-toolchain-prusa-2.9.7-uvtools-7.1.2
   cancel-in-progress: false
 
 jobs:
@@ -38,8 +38,8 @@ jobs:
           load: true
           push: false
           tags: workpiece-resin-toolchain:candidate
-          cache-from: type=gha,scope=resin-toolchain-prusa-2.9.6
-          cache-to: type=gha,mode=max,scope=resin-toolchain-prusa-2.9.6
+          cache-from: type=gha,scope=resin-toolchain-prusa-2.9.7
+          cache-to: type=gha,mode=max,scope=resin-toolchain-prusa-2.9.7
 
       - name: Verify pinned toolchain manifest and executables
         run: |

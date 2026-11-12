@@ -226,15 +226,16 @@ def parse_native_artifact_metrics(base_output: str, layer_output: str) -> Native
 
 
 def base_property_command(uvtools_cmd: str, native_path: str) -> tuple[str, ...]:
+    # UVtools 7 accepts the global --no-progress option only before the subcommand.
     return (
         uvtools_cmd,
+        "--no-progress",
         "print-properties",
         native_path,
         "-n",
         "LayerCount",
         "PrintHeight",
         "BoundingRectangleMillimeters",
-        "--no-progress",
     )
 
 
@@ -245,6 +246,7 @@ def layer_property_command(uvtools_cmd: str, native_path: str, *, layer_count: i
         )
     return (
         uvtools_cmd,
+        "--no-progress",
         "print-properties",
         native_path,
         "-r",
@@ -252,5 +254,4 @@ def layer_property_command(uvtools_cmd: str, native_path: str, *, layer_count: i
         "-n",
         "Area",
         "Volume",
-        "--no-progress",
     )

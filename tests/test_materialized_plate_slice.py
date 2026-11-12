@@ -26,7 +26,7 @@ def _profile(tmp_path: Path) -> Profile:
         config=config,
         metadata={
             "native_format": "ctb",
-            "uvtools_target": "ctb",
+            "uvtools_target": "auto",
         },
     )
 
@@ -56,28 +56,33 @@ def _fake_engine(monkeypatch, *, issue_text: str = "Issues: 0\n"):
             assert config.read_bytes() == b"exact selected config"
             output.write_bytes(b"exact plate sl1")
             return subprocess.CompletedProcess(command, 0, "sliced")
-        if len(command) >= 2 and command[1] == "convert":
-            assert Path(command[2]).read_bytes() == b"exact plate sl1"
+        # UVtools 7 contract: global --no-progress leads, then the subcommand; exit 0 on success.
+        assert command[1] == "--no-progress"
+        if len(command) >= 3 and command[2] == "convert":
+            assert Path(command[3]).read_bytes() == b"exact plate sl1"
+            assert command[4] == "auto"
+            # "auto" writes <input stem>.ctb beside the input; the engine must ask for exactly that path.
+            assert Path(command[-1]) == Path(command[3]).with_suffix(".ctb")
             Path(command[-1]).write_bytes(b"exact plate ctb")
-            return subprocess.CompletedProcess(command, 1, "converted")
-        if len(command) >= 2 and command[1] == "print-issues":
-            assert Path(command[2]).read_bytes() == b"exact plate ctb"
-            return subprocess.CompletedProcess(command, 1, issue_text)
-        if len(command) >= 2 and command[1] == "print-properties" and "-r" not in command:
-            assert Path(command[2]).read_bytes() == b"exact plate ctb"
+            return subprocess.CompletedProcess(command, 0, "converted")
+        if len(command) >= 3 and command[2] == "print-issues":
+            assert Path(command[3]).read_bytes() == b"exact plate ctb"
+            return subprocess.CompletedProcess(command, 0, issue_text)
+        if len(command) >= 3 and command[2] == "print-properties" and "-r" not in command:
+            assert Path(command[3]).read_bytes() == b"exact plate ctb"
             return subprocess.CompletedProcess(
                 command,
-                1,
+                0,
                 "LayerCount: 2\n"
                 "PrintHeight: 0.1\n"
                 "BoundingRectangleMillimeters: X=10 Y=20 Width=30 Height=40\n",
             )
-        if len(command) >= 2 and command[1] == "print-properties" and "-r" in command:
-            assert Path(command[2]).read_bytes() == b"exact plate ctb"
+        if len(command) >= 3 and command[2] == "print-properties" and "-r" in command:
+            assert Path(command[3]).read_bytes() == b"exact plate ctb"
             assert command[command.index("-r") + 1] == "0:1"
             return subprocess.CompletedProcess(
                 command,
-                1,
+                0,
                 "# Layer: 0\nArea: 100\nVolume: 0.5\n"
                 "# Layer: 1\nArea: 200\nVolume: 0.7\n",
             )

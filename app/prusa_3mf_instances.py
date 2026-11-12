@@ -250,7 +250,7 @@ def materialize_prusa_project_instances(
 
     Only the `3D/3dmodel.model` build section is changed. Object geometry, Prusa model
     metadata, SLA support points, drain holes, and resolved recipe data are copied
-    unchanged. Pinned Prusa 2.9.6 loads each build item as a `ModelInstance`; SLA support
+    unchanged. Pinned Prusa 2.9.7 loads each build item as a `ModelInstance`; SLA support
     points remain object-level, so all clones share the selected support definition.
     """
     if not isinstance(project_bytes, bytes) or not project_bytes:

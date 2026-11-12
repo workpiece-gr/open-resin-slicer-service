@@ -112,7 +112,7 @@ def test_estimate_response_shape_and_time_formula(client):
     assert response.status_code == 200
     body = response.json()
     assert body["schema"] == "workpiece-resin-estimate-v1"
-    assert body["engine"]["prusaslicer"] == "2.9.6" and body["engine"]["uvtools"] == "6.2.0"
+    assert body["engine"]["prusaslicer"] == "2.9.7" and body["engine"]["uvtools"] == "7.1.2"
     assert body["profile"] == {
         "printer": "elegoo-mars-2", "resin": "elegoo-water-washable-grey", "quality": "balanced-0p05-medium",
         "layerHeightMm": 0.05, "normalExposureS": 2.75, "initialExposureS": 30.0, "initialLayers": 5,

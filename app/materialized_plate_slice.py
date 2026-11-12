@@ -16,6 +16,9 @@ from .engine import (
     build_prusa_slice_command,
     critical_issue_count,
     parse_uvtools_issues,
+    resolve_uvtools_target,
+    uvtools_command,
+    uvtools_native_output_path,
 )
 from .profiles import Profile
 from .uvtools_metrics import (
@@ -159,14 +162,7 @@ def slice_materialized_plate_native(
         effective_config_bytes,
         effective_config_sha256,
     )
-    native_format = str(printer.metadata.get("native_format", "")).lower().lstrip(".")
-    uvtools_target = str(printer.metadata.get("uvtools_target") or native_format).strip()
-    if native_format not in {"ctb", "goo"}:
-        raise MaterializedPlateSliceError(
-            "Printer profile must declare a validated CTB or GOO native format."
-        )
-    if not uvtools_target:
-        raise MaterializedPlateSliceError("Printer profile has no UVtools conversion target.")
+    native_format, uvtools_target = resolve_uvtools_target(printer, error=MaterializedPlateSliceError)
     if not shutil.which(prusa_bin) and not Path(prusa_bin).is_file():
         raise MaterializedPlateSliceError("Pinned PrusaSlicer binary is unavailable.")
     if not shutil.which(uvtools_cmd) and not Path(uvtools_cmd).is_file():
@@ -177,7 +173,6 @@ def slice_materialized_plate_native(
         project_path = root / "materialized.3mf"
         config_path = root / "effective.ini"
         intermediate_path = root / "production.sl1"
-        native_path = root / f"production.{native_format}"
         project_path.write_bytes(project_bytes)
         config_path.write_bytes(effective_config_bytes)
 
@@ -203,8 +198,9 @@ def slice_materialized_plate_native(
                     "PrusaSlicer did not produce the expected SLA archive from the exact materialized plate."
                 )
 
+        native_path = uvtools_native_output_path(intermediate_path, native_format)
         conversion = _run(
-            [uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)],
+            uvtools_command(uvtools_cmd, "convert", str(intermediate_path), uvtools_target, str(native_path)),
             timeout=uvtools_timeout,
         )
         _require_uvtools_status(conversion, "plate conversion")
@@ -214,7 +210,7 @@ def slice_materialized_plate_native(
             )
 
         inspection = _run(
-            [uvtools_cmd, "print-issues", str(native_path), "--no-progress"],
+            uvtools_command(uvtools_cmd, "print-issues", str(native_path)),
             timeout=uvtools_timeout,
         )
         _require_uvtools_status(inspection, "plate issue inspection")
