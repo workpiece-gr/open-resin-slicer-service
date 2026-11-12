@@ -32,7 +32,7 @@ from .orientation_pipeline import build_proxy_orientation_plan, proxy_orientatio
 from .orientation_proxy import OrientationProxyError
 from .orientation_screen import DEFAULT_PROXY_FINALISTS, MAX_PROXY_FINALISTS, OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
-from .project import ProjectError, build_order_project, prepare_order_project
+from .project import ProjectError, build_order_project, estimate_plate_plan, prepare_order_project
 from .stl import StlValidationError, validate_stl_bytes
 
 PROFILE_ROOT = Path(os.environ.get("PROFILE_ROOT", "/app/profiles"))
@@ -295,14 +295,46 @@ async def estimate(
     rotate_x: float = Form(0.0),
     rotate_y: float = Form(0.0),
     rotate_z: float = Form(0.0),
+    requested_quantity: int | None = Form(None),
+    orientation: str = Form("as-uploaded"),
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Lean per-part measurements for instant quotes: no price, no retained artifacts."""
+    """Lean per-part measurements for instant quotes: no price, no retained artifacts.
+
+    ``orientation=auto`` measures the part in the orientation the order project would start from (the geometry
+    proxy's best finalist, ``/v1/orientation/proxy`` with one finalist) instead of as uploaded; it cannot be
+    combined with explicit rotate_x/y/z. With ``requested_quantity`` the answer also carries ``plate_plan``: the
+    plate count, parts per plate and total print time from the SAME planner ``/v1/project`` builds its plates
+    from (``project.plan_order_plates``), so the quote and the build agree. The project's sliced finalist
+    comparison can still pick another orientation than the proxy's best; the build stays authoritative.
+    """
     _authorize(authorization)
+    if orientation not in ("as-uploaded", "auto"):
+        raise EstimateError("INVALID_ORIENTATION", "orientation must be as-uploaded or auto.").http()
+    if orientation == "auto" and (rotate_x, rotate_y, rotate_z) != (0.0, 0.0, 0.0):
+        raise EstimateError("INVALID_ORIENTATION", "orientation=auto cannot be combined with rotate_x/y/z.").http()
+    if requested_quantity is not None and (isinstance(requested_quantity, bool) or not 1 <= requested_quantity <= MAX_PROJECT_QUANTITY):
+        raise EstimateError("INVALID_QUANTITY", f"requested_quantity must be between 1 and {MAX_PROJECT_QUANTITY}.").http()
     try:
         filename, data = await _read_stl_upload(file)
     except HTTPException as exc:
         raise EstimateError("INVALID_STL", str(exc.detail), status=exc.status_code).http() from exc
+    chosen = Orientation(rotate_x, rotate_y, rotate_z)
+    auto_warning = None
+    if orientation == "auto":
+        await _acquire_capacity(PROXY_CAPACITY, "Orientation proxy")
+        try:
+            try:
+                proxy_plan = await run_in_threadpool(build_proxy_orientation_plan, data, finalist_limit=1)
+            except (OrientationPlanError, OrientationProxyError, OrientationScreenError) as exc:
+                raise EstimateError("ORIENTATION_FAILED", str(exc), status=422).http() from exc
+        finally:
+            PROXY_CAPACITY.release()
+        if proxy_plan.screening.finalists:
+            spec = proxy_plan.screening.finalists[0].candidate.spec
+            chosen = Orientation(spec.x_deg, spec.y_deg, spec.z_deg)
+        else:
+            auto_warning = "No orientation passed the geometry screening; the part was measured as uploaded."
     try:
         prepared = await run_in_threadpool(
             prepare_estimate,
@@ -311,7 +343,7 @@ async def estimate(
             printer_id=printer_profile,
             resin_id=resin_profile,
             quality_id=quality,
-            orientation=Orientation(rotate_x, rotate_y, rotate_z),
+            orientation=chosen,
         )
     except EstimateError as exc:
         raise exc.http() from exc
@@ -350,6 +382,18 @@ async def estimate(
         payload = build_estimate(prepared, artifact, metrics, service_commit=SERVICE_COMMIT)
     except EstimateError as exc:
         raise exc.http() from exc
+    if auto_warning:
+        payload["warnings"].append(auto_warning)
+    if requested_quantity is not None:
+        footprint = payload["summary"]["print_footprint_mm"]
+        payload["plate_plan"] = estimate_plate_plan(
+            printer_id=prepared.printer.id,
+            envelope=_registry_snapshot().printer_manufacturing_envelope(prepared.printer.id),
+            footprint_width_mm=footprint["width"],
+            footprint_depth_mm=footprint["depth"],
+            quantity=requested_quantity,
+            print_time_seconds=payload["summary"]["print_time_seconds"],
+        )
     return JSONResponse(content=payload, headers={"Cache-Control": "private, no-store"})
 
 

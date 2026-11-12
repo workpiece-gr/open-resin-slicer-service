@@ -185,3 +185,65 @@ def test_estimate_real_slice_of_20mm_cube(monkeypatch):
     assert 8.0 <= summary["total_resin_ml"] <= 14.0
     assert summary["model_volume_ml"] == 8.0
     assert summary["fits_envelope"] is True
+
+
+# ---- plate plan in /v1/estimate (requested_quantity) and orientation=auto -------------------------------------------------
+# FAILURE MODE (seen 2026-11-12): the quote said 3 plates (its own heuristic) while the project build made 4 plates for the
+# same 15 parts, so the quote under-priced the print time. The estimate now reports the plan from the planner the build uses.
+
+def test_estimate_without_a_quantity_has_no_plate_plan(client):
+    assert "plate_plan" not in post(client).json()
+
+
+def test_estimate_with_a_quantity_reports_the_build_planners_plate_plan(client, monkeypatch):
+    # the real measurement of the 40 x 30 x 20 box standing on its 40 x 20 face: supported footprint 44.12 x 26.83 mm
+    monkeypatch.setattr(main, "measure_native", lambda *a, **k: metrics(width=44.12, depth=26.83, z=30.0))
+    body = post(client, requested_quantity="15").json()
+    plan = body["plate_plan"]
+    assert plan["status"] == "ok" and plan["quantity"] == 15
+    assert plan["parts_per_plate"] == 4 and plan["plate_count"] == 4
+    assert [plate["instances"] for plate in plan["plates"]] == [4, 4, 4, 3]     # exactly what the real project build produced
+    assert plan["spacing_mm"] == 5.0 and plan["edge_margin_mm"] == 3.0
+    assert plan["plate_print_seconds"] == body["summary"]["print_time_seconds"]
+    assert plan["total_print_seconds"] == pytest.approx(4 * body["summary"]["print_time_seconds"], abs=0.2)
+    # and it IS the planner's own answer, not a copy of its rules
+    from app.profiles import ProfileRegistry
+    from app.project import plan_order_plates
+    envelope = ProfileRegistry(PROFILES).printer_manufacturing_envelope("elegoo-mars-2")
+    assert plan_order_plates(printer_id="elegoo-mars-2", envelope=envelope, footprint_width_mm=44.12, footprint_depth_mm=26.83, quantity=15).plate_count == plan["plate_count"]
+
+
+def test_estimate_plate_plan_reports_a_footprint_that_does_not_fit(client, monkeypatch):
+    monkeypatch.setattr(main, "measure_native", lambda *a, **k: metrics(width=200.0, depth=25.0, z=30.0))
+    plan = post(client, requested_quantity="3").json()["plate_plan"]
+    assert plan["status"] == "does_not_fit" and "plate_count" not in plan
+
+
+def test_estimate_rejects_a_bad_quantity_or_orientation_mode_before_slicing(client, monkeypatch):
+    monkeypatch.setattr(main, "slice_native", lambda *a, **k: pytest.fail("must not slice"))
+    for form in ({"requested_quantity": "0"}, {"requested_quantity": "100000"}, {"orientation": "sideways"}, {"orientation": "auto", "rotate_x": "90"}):
+        response = post(client, **form)
+        assert response.status_code in (422,), form
+    assert post(client, requested_quantity="0").json()["detail"]["code"] == "INVALID_QUANTITY"
+    assert post(client, orientation="auto", rotate_x="90").json()["detail"]["code"] == "INVALID_ORIENTATION"
+
+
+def test_orientation_auto_measures_in_the_proxy_best_orientation(client, monkeypatch):
+    from types import SimpleNamespace
+    seen = []
+    spec = SimpleNamespace(x_deg=90.0, y_deg=0.0, z_deg=0.0)
+    plan = SimpleNamespace(screening=SimpleNamespace(finalists=(SimpleNamespace(candidate=SimpleNamespace(spec=spec)),)))
+    asked = []
+    monkeypatch.setattr(main, "build_proxy_orientation_plan", lambda data, finalist_limit: asked.append(finalist_limit) or plan)
+    monkeypatch.setattr(main, "slice_native", lambda *a, **k: seen.append(k["orientation"]) or artifact())
+    body = post(client, orientation="auto", requested_quantity="2").json()
+    assert asked == [1] and (seen[0].x, seen[0].y, seen[0].z) == (90.0, 0.0, 0.0)
+    assert body["summary"]["orientation_deg"] == [90.0, 0.0, 0.0] and body["plate_plan"]["status"] == "ok"
+
+
+def test_orientation_auto_without_a_finalist_measures_as_uploaded_and_says_so(client, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(main, "build_proxy_orientation_plan", lambda data, finalist_limit: SimpleNamespace(screening=SimpleNamespace(finalists=())))
+    body = post(client, orientation="auto").json()
+    assert body["summary"]["orientation_deg"] == [0.0, 0.0, 0.0]
+    assert any("measured as uploaded" in warning for warning in body["warnings"])

@@ -257,6 +257,42 @@ def _require_footprints_inside_bed(plate_index, placements, rectangle, prepared:
             )
 
 
+def estimate_plate_plan(
+    *,
+    printer_id: str,
+    envelope: ManufacturingEnvelope,
+    footprint_width_mm: float,
+    footprint_depth_mm: float,
+    quantity: int,
+    print_time_seconds: float,
+) -> dict:
+    """The plate plan of an estimate: the same ``plan_order_plates`` the project build uses, as JSON.
+
+    Every plate holds identical parts, so every plate exposes the same number of layers and takes the one-part
+    ``print_time_seconds`` (MSLA exposes the whole plate per layer); the order takes plate_count times that.
+    """
+    try:
+        plan = plan_order_plates(
+            printer_id=printer_id, envelope=envelope, footprint_width_mm=footprint_width_mm,
+            footprint_depth_mm=footprint_depth_mm, quantity=quantity,
+        )
+    except PlatePlanError as exc:
+        return {"status": "does_not_fit", "quantity": quantity, "reason": str(exc)}
+    return {
+        "status": "ok",
+        "quantity": quantity,
+        "parts_per_plate": plan.capacity_per_plate,
+        "plate_count": plan.plate_count,
+        "plates": [{"plate_index": plate.plate_index, "instances": len(plate.placements)} for plate in plan.plates],
+        "footprint_mm": {"width": footprint_width_mm, "depth": footprint_depth_mm},
+        "spacing_mm": plan.spacing_mm,
+        "edge_margin_mm": plan.edge_margin_mm,
+        "rotation_z_deg": plan.rotation_z_deg,
+        "plate_print_seconds": round(print_time_seconds, 1),
+        "total_print_seconds": round(print_time_seconds * plan.plate_count, 1),
+    }
+
+
 def build_order_project(
     prepared: ProjectInput,
     *,
@@ -306,16 +342,15 @@ def build_order_project(
 
     # 2. plate plan on the manufacturing envelope (envelope coordinates, lower-left origin)
     try:
-        plan = plan_printer_profile_instances(
-            registry=_FixedEnvelopeRegistry(prepared),
-            printer_profile_id=printer.id,
+        plan = plan_order_plates(
+            printer_id=printer.id,
+            envelope=prepared.envelope,
             footprint_width_mm=rectangle.width_mm,
             footprint_depth_mm=rectangle.height_mm,
             quantity=prepared.requested_quantity,
             spacing_mm=spacing_mm,
             edge_margin_mm=edge_margin_mm,
-            allow_rotate_90=True,
-        ).plan
+        )
     except PlatePlanError as exc:
         raise ProjectError(
             "DOES_NOT_FIT",
@@ -514,12 +549,41 @@ def build_order_project(
 
 
 class _FixedEnvelopeRegistry:
-    """Hand ``plan_printer_profile_instances`` the envelope resolved during preparation."""
+    """Hand ``plan_printer_profile_instances`` an envelope that was already resolved."""
 
-    def __init__(self, prepared: ProjectInput):
-        self._prepared = prepared
+    def __init__(self, printer_id: str, envelope: ManufacturingEnvelope):
+        self._printer_id = printer_id
+        self._envelope = envelope
 
     def printer_manufacturing_envelope(self, printer_id: str) -> ManufacturingEnvelope:
-        if printer_id != self._prepared.printer.id:
+        if printer_id != self._printer_id:
             raise PlatePlanError(f"Unexpected printer profile {printer_id}.")
-        return self._prepared.envelope
+        return self._envelope
+
+
+def plan_order_plates(
+    *,
+    printer_id: str,
+    envelope: ManufacturingEnvelope,
+    footprint_width_mm: float,
+    footprint_depth_mm: float,
+    quantity: int,
+    spacing_mm: float = DEFAULT_SPACING_MM,
+    edge_margin_mm: float = DEFAULT_EDGE_MARGIN_MM,
+):
+    """THE plate plan: how many copies fit on a plate and how many plates an order needs.
+
+    ``/v1/project`` builds its plates from this function and ``/v1/estimate`` (with a quantity) reports its
+    result, so the quote and the build can never disagree on the plate count. Raises ``PlatePlanError`` when
+    one copy does not fit.
+    """
+    return plan_printer_profile_instances(
+        registry=_FixedEnvelopeRegistry(printer_id, envelope),
+        printer_profile_id=printer_id,
+        footprint_width_mm=footprint_width_mm,
+        footprint_depth_mm=footprint_depth_mm,
+        quantity=quantity,
+        spacing_mm=spacing_mm,
+        edge_margin_mm=edge_margin_mm,
+        allow_rotate_90=True,
+    ).plan
