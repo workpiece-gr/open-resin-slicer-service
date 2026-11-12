@@ -230,3 +230,24 @@ def test_candidate_mode_retains_critical_issue_evidence_without_hiding_it(tmp_pa
     assert result.issue_summary["islands"] == 1
     assert "Island,1" in result.issue_text
     assert result.native_metrics.bounding_rectangle.width_mm == 30
+
+
+def test_missing_sla_archive_error_shows_the_slicer_output_and_directory(tmp_path, monkeypatch):
+    project = b"exact materialized project"
+    config = b"exact selected config"
+
+    def silent_prusa(command, *, timeout):
+        return subprocess.CompletedProcess(command, 0, stdout="No objects fit on the print bed\n", stderr=None)
+
+    monkeypatch.setattr(plate_slice, "_run", silent_prusa)
+    prusa = tmp_path / "prusaslicer"
+    uvtools = tmp_path / "UVtoolsCmd"
+    prusa.write_text("fake", encoding="utf-8")
+    uvtools.write_text("fake", encoding="utf-8")
+    with pytest.raises(MaterializedPlateSliceError) as caught:
+        slice_materialized_plate_native(
+            project_bytes=project, project_sha256=_sha(project), effective_config_bytes=config, effective_config_sha256=_sha(config),
+            printer=_profile(tmp_path), prusa_bin=str(prusa), uvtools_cmd=str(uvtools), slice_timeout=10, uvtools_timeout=10, reject_critical=True,
+        )
+    text = str(caught.value)
+    assert "No objects fit on the print bed" in text and "materialized.3mf" in text and "effective.ini" in text
