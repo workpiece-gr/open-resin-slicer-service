@@ -1,6 +1,6 @@
 # ELEGOO Mars 2 acceptance plan
 
-Status: **source profile created; physical acceptance not started**.
+Status: **source profile created; toolchain image not yet built on the host; physical acceptance not started**.
 
 ## Known machine contract
 
@@ -20,25 +20,23 @@ ELEGOO Water Washable Resin at 0.05 mm. ELEGOO's published settings vary by colo
 
 The first selected color is **Grey / Ceramic Grey**. The candidate profile `elegoo-water-washable-grey` uses the midpoint of ELEGOO's published Mars 2 / Mars 2 Pro range as its starting seed: **2.75 s normal exposure and 30 s initial exposure at 0.05 mm**. It is candidate-ready only and must be calibrated on the physical printer before production promotion.
 
-## CP1 acceptance sequence
+## Acceptance sequence
 
-1. Build the pinned Docker image and verify `/health` reports both engines.
-2. Use the candidate tuple `elegoo-mars-2 + elegoo-water-washable-grey + balanced-0p05-medium`; keep production disabled.
-3. Slice a small benign calibration STL through `/v1/candidate`.
-4. Verify source, SL1 and CTB SHA-256 provenance.
-5. Open the CTB in UVtools desktop and verify resolution, physical dimensions, mirror/orientation, layer height, exposure, bottom exposure, lift/retract values and issue report.
-6. Compare the generated file with an equivalent ChiTuBox slice for the same STL/settings.
-7. Put only the reviewed candidate on USB and confirm the Mars 2 recognizes the file and previews it correctly before starting exposure.
-8. Print a small calibration object. Record temperature, resin bottle/color/batch if available, exposure settings, measured dimensions, support behavior and print defects.
-9. Calibrate exposure rather than blindly accepting the manufacturer midpoint.
+1. Build the toolchain image from `Dockerfile.toolchain` on the host, then the service image; verify `/health` reports both engines available.
+2. Use the tuple `elegoo-mars-2 + elegoo-water-washable-grey + balanced-0p05-medium`.
+3. Run `/v1/estimate` and one `/v1/project` (a few pieces of a small part) and open each plate 3MF in PrusaSlicer with the bundled effective config.
+4. Run `scripts/calibrate_mars2_mapping.py` on plate 1 to establish the bed-to-CTB mirror mapping and the footprint asymmetry; note the result in the printer profile.
+5. Open a plate CTB in UVtools desktop and verify resolution, physical dimensions, mirror/orientation, layer height, exposure, bottom exposure, lift/retract values and the issue report.
+6. Compare with an equivalent ChiTuBox slice of the same STL/settings.
+7. Put the reviewed CTB on USB and confirm the Mars 2 recognizes and previews it before starting exposure.
+8. Print a small calibration object. Record temperature, resin bottle/color/batch, exposure settings, measured dimensions, support behaviour and defects.
+9. Calibrate exposure rather than accepting the manufacturer midpoint; update the resin `.ini` and JSON seeds.
 10. Repeat until a documented stable profile exists.
-11. Only then promote the exact printer/resin/quality tuple to `production_ready` and `production_combinations`.
 
-## Fail-closed rules
+## Rules
 
-- No substitution of grey settings for another resin color without its own candidate profile.
-- No generic resin production profile.
+- No substitution of grey settings for another resin color without its own profile.
+- No generic resin profile.
 - No Mars 2 Pro 160 mm Z assumption.
-- No production endpoint before physical acceptance.
+- Every plate project is opened and reviewed by a person before printing.
 - No automatic sending to the printer.
-- No silent ignoring of UVtools critical issues in production.

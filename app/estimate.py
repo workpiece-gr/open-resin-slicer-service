@@ -1,9 +1,10 @@
 """Lean per-part resin measurement for instant quotes.
 
 `POST /v1/estimate` returns measurements only (layers, volumes, time, issues). It
-never prices and never retains artifacts. It reuses the production engine
-(`engine.slice_native`), the STL validator, the profile registry and the pinned
-UVtools metric parsers; it adds nothing to the production-authority chain.
+never prices and never retains artifacts. It reuses the engine (`engine.slice_native`),
+the STL validator, the profile registry and the UVtools metric parsers. `/v1/project`
+reuses `cycle_profile` and `formula_print_time_seconds` so both routes report the same
+print time for the same layer count.
 """
 from __future__ import annotations
 
@@ -32,7 +33,6 @@ from .stl import StlValidationError, validate_stl_bytes
 from .uvtools_metrics import NativeArtifactMetrics
 
 ESTIMATE_SCHEMA = "workpiece-resin-estimate-v1"
-ESTIMATE_AUTHORITY = "estimate-only"
 
 
 class EstimateError(Exception):
@@ -203,6 +203,12 @@ def cycle_profile(resin: Profile, effective_config: bytes) -> CycleProfile:
         raise EstimateError("UNSUPPORTED_PROFILE", f"Profile lacks a value needed for the time formula: {exc}") from exc
 
 
+def formula_print_time_seconds(cycle: CycleProfile, layer_count: int) -> float:
+    """Layer count x profile cycle: bottom layers at the initial exposure, the rest at normal."""
+    bottom = min(cycle.initial_layers, layer_count)
+    return bottom * cycle.bottom_cycle_s + (layer_count - bottom) * cycle.normal_cycle_s
+
+
 def measure_native(artifact: NativeArtifact, *, uvtools_cmd: str, uvtools_timeout: int) -> NativeArtifactMetrics:
     with tempfile.TemporaryDirectory(prefix="workpiece-estimate-") as temp:
         path = Path(temp) / f"estimate{Path(artifact.filename).suffix}"
@@ -221,13 +227,12 @@ def build_estimate(
     artifact: NativeArtifact,
     metrics: NativeArtifactMetrics,
     *,
-    toolchain_image_ref: str | None,
     service_commit: str | None,
 ) -> dict:
     cycle = cycle_profile(prepared.resin, artifact.effective_config_bytes)
     layers = metrics.layer_count
     bottom = min(cycle.initial_layers, layers)
-    print_time = bottom * cycle.bottom_cycle_s + (layers - bottom) * cycle.normal_cycle_s
+    print_time = formula_print_time_seconds(cycle, layers)
     total_ml = metrics.material_volume_mm3 / 1000.0
     model_ml = prepared.mesh.volume_mm3 / 1000.0
     rect = metrics.bounding_rectangle
@@ -242,15 +247,12 @@ def build_estimate(
         warnings.append("Supported print exceeds the manufacturing envelope; manual review required.")
     if critical_issue_count(artifact.issue_summary) > 0:
         warnings.append("UVtools reported critical print issues; manual review required.")
-    digest = toolchain_image_ref.partition("@")[2] if toolchain_image_ref and "@" in toolchain_image_ref else None
     return {
         "schema": ESTIMATE_SCHEMA,
-        "authority": ESTIMATE_AUTHORITY,
         "engine": {
             "prusaslicer": PRUSA_SLICER_VERSION,
             "prusaslicerCommit": PRUSA_SLICER_COMMIT,
             "uvtools": UVTOOLS_VERSION,
-            "toolchainDigest": digest,
             "serviceCommit": service_commit or None,
         },
         "profile": {

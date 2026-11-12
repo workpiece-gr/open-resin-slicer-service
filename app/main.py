@@ -30,21 +30,10 @@ from .estimate import (
 from .orientation import OrientationPlanError
 from .orientation_pipeline import build_proxy_orientation_plan, proxy_orientation_plan_manifest
 from .orientation_proxy import OrientationProxyError
-from .orientation_screen import MAX_PROXY_FINALISTS, OrientationScreenError
-from .production_bundle import ProductionBundleError, build_selected_production_bundle
-from .production_orchestration import (
-    PRODUCTION_ORDER_AUTHORITY,
-    ProductionOrchestrationError,
-    execute_selected_production_order,
-)
+from .orientation_screen import DEFAULT_PROXY_FINALISTS, MAX_PROXY_FINALISTS, OrientationScreenError
 from .profiles import ProfileError, ProfileRegistry
+from .project import ProjectError, build_order_project, prepare_order_project
 from .stl import StlValidationError, validate_stl_bytes
-from .toolchain import (
-    TOOLCHAIN_REF_ENV,
-    ToolchainProvenanceError,
-    resolve_toolchain_ref,
-    toolchain_record,
-)
 
 PROFILE_ROOT = Path(os.environ.get("PROFILE_ROOT", "/app/profiles"))
 SOURCE_CODE_URL = os.environ.get("SOURCE_CODE_URL", "https://github.com/workpiece-gr/open-resin-slicer-service")
@@ -54,8 +43,9 @@ UVTOOLS_CMD = os.environ.get("UVTOOLS_CMD", "/opt/uvtools/UVtoolsCmd")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(30 * 1024 * 1024)))
 SLICE_TIMEOUT = int(os.environ.get("SLICE_TIMEOUT_SECONDS", "240"))
 UVTOOLS_TIMEOUT = int(os.environ.get("UVTOOLS_TIMEOUT_SECONDS", "120"))
-# /v1/estimate shares the single slice slot but may queue behind a running slice.
+# /v1/estimate and /v1/project share the single slice slot but may queue behind a running slice.
 ESTIMATE_QUEUE_TIMEOUT = float(os.environ.get("ESTIMATE_QUEUE_TIMEOUT_SECONDS", "60"))
+PROJECT_QUEUE_TIMEOUT = float(os.environ.get("PROJECT_QUEUE_TIMEOUT_SECONDS", "600"))
 SERVICE_COMMIT = os.environ.get("WORKPIECE_RESIN_SERVICE_COMMIT", "")
 
 
@@ -81,14 +71,14 @@ def _capacity_wait_seconds() -> float:
     return value
 
 
-def _production_quantity_limit() -> int:
-    raw = os.environ.get("MAX_PRODUCTION_QUANTITY", "100").strip()
+def _project_quantity_limit() -> int:
+    raw = os.environ.get("MAX_PROJECT_QUANTITY", "100").strip()
     try:
         value = int(raw)
     except ValueError as exc:
-        raise RuntimeError("MAX_PRODUCTION_QUANTITY must be an integer between 1 and 10000.") from exc
-    if not 1 <= value <= 10000:
-        raise RuntimeError("MAX_PRODUCTION_QUANTITY must be an integer between 1 and 10000.")
+        raise RuntimeError("MAX_PROJECT_QUANTITY must be an integer between 1 and 1000.") from exc
+    if not 1 <= value <= 1000:
+        raise RuntimeError("MAX_PROJECT_QUANTITY must be an integer between 1 and 1000.")
     return value
 
 
@@ -106,11 +96,11 @@ def _registry_snapshot() -> ProfileRegistry:
 MAX_CONCURRENT_SLICES = _bounded_concurrency("MAX_CONCURRENT_SLICES", 1)
 MAX_CONCURRENT_PROXY_JOBS = _bounded_concurrency("MAX_CONCURRENT_PROXY_JOBS", 1)
 RESOURCE_CAPACITY_WAIT_SECONDS = _capacity_wait_seconds()
-MAX_PRODUCTION_QUANTITY = _production_quantity_limit()
+MAX_PROJECT_QUANTITY = _project_quantity_limit()
 SLICE_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_SLICES)
 PROXY_CAPACITY = asyncio.Semaphore(MAX_CONCURRENT_PROXY_JOBS)
 
-app = FastAPI(title="Workpiece Open Resin Slicer Service", version="0.9.0")
+app = FastAPI(title="Workpiece Open Resin Slicer Service", version="1.0.0")
 
 
 def _binary_available(path: str) -> bool:
@@ -141,6 +131,10 @@ async def _acquire_capacity(semaphore: asyncio.Semaphore, workload: str) -> None
         ) from exc
 
 
+def _coded_http(code: str, message: str, status: int, headers: dict[str, str] | None = None) -> HTTPException:
+    return HTTPException(status_code=status, detail={"code": code, "message": message}, headers=headers)
+
+
 async def _read_stl_upload(file: UploadFile) -> tuple[str, bytes]:
     filename = file.filename or ""
     if not filename.lower().endswith(".stl"):
@@ -149,19 +143,6 @@ async def _read_stl_upload(file: UploadFile) -> tuple[str, bytes]:
     if not data or len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="STL exceeds the configured upload limit.")
     return filename, data
-
-
-def _toolchain_health() -> dict:
-    try:
-        ref = resolve_toolchain_ref(required=False)
-        return {**toolchain_record(ref), "valid": True}
-    except ToolchainProvenanceError as exc:
-        return {
-            "toolchain_image_ref": os.environ.get(TOOLCHAIN_REF_ENV) or None,
-            "immutable": False,
-            "valid": False,
-            "error": str(exc),
-        }
 
 
 @app.get("/health")
@@ -173,20 +154,19 @@ def health() -> dict:
         "engines": {
             "prusaslicer": {"version": PRUSA_SLICER_VERSION, "commit": PRUSA_SLICER_COMMIT, "available": _binary_available(PRUSA_BIN)},
             "uvtools": {"version": UVTOOLS_VERSION, "available": _binary_available(UVTOOLS_CMD)},
-            "toolchain": _toolchain_health(),
         },
+        "service_commit": SERVICE_COMMIT or None,
         "resource_limits": {
             "max_upload_bytes": MAX_UPLOAD_BYTES,
             "max_concurrent_slices": MAX_CONCURRENT_SLICES,
             "max_concurrent_proxy_jobs": MAX_CONCURRENT_PROXY_JOBS,
-            "max_production_quantity": MAX_PRODUCTION_QUANTITY,
+            "max_project_quantity": MAX_PROJECT_QUANTITY,
             "capacity_wait_seconds": RESOURCE_CAPACITY_WAIT_SECONDS,
+            "slice_timeout_seconds": SLICE_TIMEOUT,
+            "uvtools_timeout_seconds": UVTOOLS_TIMEOUT,
         },
-        "candidate_profiles_ready": registry.candidate_ready,
-        "production_profiles_ready": registry.production_ready,
+        "profiles_ready": registry.candidate_ready,
         "project_api_enabled": bool(PROJECT_TOKEN),
-        "production_http_endpoint_ready": True,
-        "artifact_contract": "source STL -> selected retained 3MF + effective config -> deterministic materialized plate 3MFs -> per-plate SL1 -> printer-native CTB/GOO + authority evidence",
         "source": SOURCE_CODE_URL,
     }
 
@@ -204,10 +184,10 @@ def profiles() -> dict:
 @app.post("/v1/orientation/proxy")
 async def orientation_proxy(
     file: UploadFile = File(...),
-    finalist_limit: int = Form(5),
+    finalist_limit: int = Form(DEFAULT_PROXY_FINALISTS),
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Geometry-only orientation screening; never grants manufacturing authority."""
+    """Geometry-only orientation screening (no slicing)."""
     _authorize(authorization)
     if isinstance(finalist_limit, bool) or not 1 <= finalist_limit <= MAX_PROXY_FINALISTS:
         raise HTTPException(
@@ -234,24 +214,19 @@ async def orientation_proxy(
     )
 
 
-async def _candidate_slice_request(
-    *,
-    file: UploadFile,
-    printer_profile: str,
-    resin_profile: str,
-    quality: str,
-    rotate_x: float,
-    rotate_y: float,
-    rotate_z: float,
-    authorization: str | None,
+@app.post("/v1/candidate")
+async def candidate(
+    file: UploadFile = File(...),
+    printer_profile: str = Form(...),
+    resin_profile: str = Form(...),
+    quality: str = Form(...),
+    rotate_x: float = Form(0.0),
+    rotate_y: float = Form(0.0),
+    rotate_z: float = Form(0.0),
+    authorization: str | None = Header(default=None),
 ) -> Response:
-    """Execute the explicitly non-authoritative acceptance-candidate direct slice path."""
+    """Direct slice of one part in a proposed orientation; returns the review bundle ZIP."""
     _authorize(authorization)
-    try:
-        toolchain_ref = resolve_toolchain_ref(required=False)
-    except ToolchainProvenanceError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-
     filename, data = await _read_stl_upload(file)
     await _acquire_capacity(SLICE_CAPACITY, "Resin slicing")
     try:
@@ -277,22 +252,20 @@ async def _candidate_slice_request(
                 uvtools_timeout=UVTOOLS_TIMEOUT,
                 reject_critical=False,
             )
-            authority = "acceptance-candidate-only"
-            execution_environment = toolchain_record(toolchain_ref)
+            authority = "review-candidate"
             bundle, bundle_filename = await run_in_threadpool(
                 build_review_bundle,
                 data,
                 original_name=filename,
                 artifact=artifact,
                 authority=authority,
-                execution_environment=execution_environment,
             )
         except (StlValidationError, ProfileError, EngineError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
     finally:
         SLICE_CAPACITY.release()
 
-    metadata = compact_metadata(artifact, execution_environment=execution_environment)
+    metadata = compact_metadata(artifact)
     critical = sum(artifact.issue_summary.get(k, 0) for k in ("islands", "resin_traps", "suction_cups", "touching_bounds", "empty_layers"))
     headers = {
         "Content-Disposition": f'attachment; filename="{bundle_filename}"',
@@ -310,32 +283,7 @@ async def _candidate_slice_request(
         "X-Workpiece-Resin-Metadata": metadata,
         "Cache-Control": "private, no-store",
     }
-    if toolchain_ref is not None:
-        headers["X-Workpiece-Toolchain-Ref"] = toolchain_ref
     return Response(content=bundle, media_type="application/zip", headers=headers)
-
-
-@app.post("/v1/candidate")
-async def candidate(
-    file: UploadFile = File(...),
-    printer_profile: str = Form(...),
-    resin_profile: str = Form(...),
-    quality: str = Form(...),
-    rotate_x: float = Form(0.0),
-    rotate_y: float = Form(0.0),
-    rotate_z: float = Form(0.0),
-    authorization: str | None = Header(default=None),
-) -> Response:
-    return await _candidate_slice_request(
-        file=file,
-        printer_profile=printer_profile,
-        resin_profile=resin_profile,
-        quality=quality,
-        rotate_x=rotate_x,
-        rotate_y=rotate_y,
-        rotate_z=rotate_z,
-        authorization=authorization,
-    )
 
 
 @app.post("/v1/estimate")
@@ -349,7 +297,7 @@ async def estimate(
     rotate_z: float = Form(0.0),
     authorization: str | None = Header(default=None),
 ) -> JSONResponse:
-    """Lean per-part measurements for instant quotes: no price, no retained artifacts, no authority."""
+    """Lean per-part measurements for instant quotes: no price, no retained artifacts."""
     _authorize(authorization)
     try:
         filename, data = await _read_stl_upload(file)
@@ -399,13 +347,7 @@ async def estimate(
         SLICE_CAPACITY.release()
 
     try:
-        payload = build_estimate(
-            prepared,
-            artifact,
-            metrics,
-            toolchain_image_ref=_toolchain_health().get("toolchain_image_ref"),
-            service_commit=SERVICE_COMMIT,
-        )
+        payload = build_estimate(prepared, artifact, metrics, service_commit=SERVICE_COMMIT)
     except EstimateError as exc:
         raise exc.http() from exc
     return JSONResponse(content=payload, headers={"Cache-Control": "private, no-store"})
@@ -418,86 +360,66 @@ async def project(
     resin_profile: str = Form(...),
     quality: str = Form(...),
     requested_quantity: int = Form(1),
-    finalist_limit: int = Form(5),
-    rotate_x: float = Form(0.0),
-    rotate_y: float = Form(0.0),
-    rotate_z: float = Form(0.0),
+    finalist_limit: int = Form(DEFAULT_PROXY_FINALISTS),
     authorization: str | None = Header(default=None),
 ) -> Response:
-    """Execute the selected, evidence-backed multi-plate production authority path."""
+    """Order project: orient, plan plates for the quantity, slice every plate; returns a ZIP.
+
+    Background job for the website after an order. The ZIP holds one PrusaSlicer 3MF and
+    one CTB per plate, the effective config and ``project.json``. The workshop opens and
+    reviews every plate project before printing.
+    """
     _authorize(authorization)
-
-    rotations = (rotate_x, rotate_y, rotate_z)
-    if any(not math.isfinite(value) or abs(value) > 1e-9 for value in rotations):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Production resin orientation is selected automatically from sliced finalist evidence; manual rotate_x/rotate_y/rotate_z overrides are not accepted."
-            ),
-        )
-    if isinstance(requested_quantity, bool) or not 1 <= requested_quantity <= MAX_PRODUCTION_QUANTITY:
-        raise HTTPException(
-            status_code=422,
-            detail=f"requested_quantity must be between 1 and {MAX_PRODUCTION_QUANTITY}.",
-        )
+    if isinstance(requested_quantity, bool) or not 1 <= requested_quantity <= MAX_PROJECT_QUANTITY:
+        raise _coded_http("INVALID_QUANTITY", f"requested_quantity must be between 1 and {MAX_PROJECT_QUANTITY}.", 422)
     if isinstance(finalist_limit, bool) or not 1 <= finalist_limit <= MAX_PROXY_FINALISTS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"finalist_limit must be between 1 and the {MAX_PROXY_FINALISTS}-candidate safety cap.",
+        raise _coded_http("INVALID_FINALIST_LIMIT", f"finalist_limit must be between 1 and {MAX_PROXY_FINALISTS}.", 422)
+    try:
+        filename, data = await _read_stl_upload(file)
+    except HTTPException as exc:
+        raise _coded_http("INVALID_STL", str(exc.detail), exc.status_code) from exc
+
+    try:
+        prepared = await run_in_threadpool(
+            prepare_order_project,
+            data,
+            original_name=filename,
+            requested_quantity=requested_quantity,
+            registry=_registry_snapshot(),
+            printer_id=printer_profile,
+            resin_id=resin_profile,
+            quality_id=quality,
         )
+    except ProjectError as exc:
+        raise _coded_http(exc.code, str(exc), exc.status) from exc
 
     try:
-        toolchain_ref = resolve_toolchain_ref(required=True)
-    except ToolchainProvenanceError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    assert toolchain_ref is not None
-
-    filename, data = await _read_stl_upload(file)
-    await _acquire_capacity(SLICE_CAPACITY, "Resin production slicing")
+        await asyncio.wait_for(SLICE_CAPACITY.acquire(), timeout=PROJECT_QUEUE_TIMEOUT)
+    except TimeoutError as exc:
+        raise _coded_http("BUSY", "Resin slicing capacity is busy; retry later.", 429, {"Retry-After": "120"}) from exc
     try:
-        try:
-            await run_in_threadpool(validate_stl_bytes, data)
-            registry = _registry_snapshot()
-            result = await run_in_threadpool(
-                execute_selected_production_order,
-                source_stl=data,
-                original_name=filename,
-                requested_quantity=requested_quantity,
-                registry=registry,
-                printer_profile_id=printer_profile,
-                resin_profile_id=resin_profile,
-                quality_profile_id=quality,
-                prusa_bin=PRUSA_BIN,
-                uvtools_cmd=UVTOOLS_CMD,
-                slice_timeout=SLICE_TIMEOUT,
-                uvtools_timeout=UVTOOLS_TIMEOUT,
-                finalist_limit=finalist_limit,
-            )
-            bundle, bundle_filename = await run_in_threadpool(
-                build_selected_production_bundle,
-                source_stl=data,
-                original_name=filename,
-                result=result,
-            )
-        except (ValueError, RuntimeError) as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        result = await run_in_threadpool(
+            build_order_project,
+            prepared,
+            prusa_bin=PRUSA_BIN,
+            uvtools_cmd=UVTOOLS_CMD,
+            slice_timeout=SLICE_TIMEOUT,
+            uvtools_timeout=UVTOOLS_TIMEOUT,
+            finalist_limit=finalist_limit,
+            service_commit=SERVICE_COMMIT or None,
+        )
+    except ProjectError as exc:
+        raise _coded_http(exc.code, str(exc), exc.status) from exc
     finally:
         SLICE_CAPACITY.release()
 
-    manifest = result.order_manifest
-    profiles_record = manifest.get("profiles") if isinstance(manifest, dict) else None
-    profiles_record = profiles_record if isinstance(profiles_record, dict) else {}
+    manifest = result.manifest
     headers = {
-        "Content-Disposition": f'attachment; filename="{bundle_filename}"',
-        "X-Workpiece-Authority": PRODUCTION_ORDER_AUTHORITY,
-        "X-Workpiece-Source-SHA256": result.source_sha256,
-        "X-Workpiece-Selected-Native-SHA256": result.selected_orientation_plan.native_sha256,
-        "X-Workpiece-Plate-Count": str(len(result.plates)),
-        "X-Workpiece-Printer-Profile": str(profiles_record.get("printer", printer_profile)),
-        "X-Workpiece-Resin-Profile": str(profiles_record.get("resin", resin_profile)),
-        "X-Workpiece-Quality-Profile": str(profiles_record.get("quality", quality)),
-        "X-Workpiece-Order-Schema": str(manifest.get("schema", "")),
-        "X-Workpiece-Toolchain-Ref": result.toolchain_image_ref,
+        "Content-Disposition": f'attachment; filename="{result.zip_filename}"',
+        "X-Workpiece-Source-SHA256": manifest["source"]["sha256"],
+        "X-Workpiece-Plate-Count": str(manifest["totals"]["plates"]),
+        "X-Workpiece-Instance-Count": str(manifest["totals"]["instances"]),
+        "X-Workpiece-Project-Schema": manifest["schema"],
         "Cache-Control": "private, no-store",
     }
-    return Response(content=bundle, media_type="application/zip", headers=headers)
+    return Response(content=result.zip_bytes, media_type="application/zip", headers=headers)

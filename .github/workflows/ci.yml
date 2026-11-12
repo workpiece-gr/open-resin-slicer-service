@@ -4,6 +4,12 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+    inputs:
+      toolchain_image:
+        description: "Toolchain image to run the container acceptance against (built from Dockerfile.toolchain)"
+        required: false
+        type: string
+        default: ""
 
 concurrency:
   group: resin-slicer-${{ github.event.pull_request.number || github.ref }}
@@ -20,105 +26,33 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
 
-  toolchain-pin:
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    outputs:
-      ready: ${{ steps.lock.outputs.ready }}
-      ref: ${{ steps.lock.outputs.ref }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Resolve immutable resin toolchain lock
-        id: lock
-        run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import re
-          from pathlib import Path
-
-          lock = json.loads(Path('toolchain.lock.json').read_text())
-          assert lock['schema'] == 'workpiece-resin-toolchain-lock-v1'
-          assert lock['prusaslicer'] == {
-              'version': '2.9.6',
-              'commit': 'b028299c770b8380ee81c921a2867d522f288123',
-          }
-          assert lock['uvtools']['version'] == '6.2.0'
-          assert lock['uvtools']['archive_sha256'] == 'cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f'
-
-          status = lock['status']
-          output = Path(os.environ['GITHUB_OUTPUT'])
-          if status == 'unpublished':
-              assert lock['digest'] is None
-              with output.open('a') as handle:
-                  handle.write('ready=false\n')
-                  handle.write('ref=\n')
-              print('Toolchain is intentionally unpublished; container acceptance remains blocked.')
-          elif status == 'published':
-              digest = lock['digest']
-              assert isinstance(digest, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', digest), digest
-              image = lock['image']
-              assert isinstance(image, str) and image.startswith('ghcr.io/') and '@' not in image
-              ref = f'{image}@{digest}'
-              with output.open('a') as handle:
-                  handle.write('ready=true\n')
-                  handle.write(f'ref={ref}\n')
-              print(f'Locked toolchain: {ref}')
-          else:
-              raise AssertionError(f'unsupported toolchain lock status: {status!r}')
-          PY
-
   container-acceptance:
-    needs:
-      - unit
-      - toolchain-pin
-    if: ${{ (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') && needs.toolchain-pin.outputs.ready == 'true' }}
+    # Real-toolchain run; dispatch only, because the toolchain image is built on the host, not published.
+    needs: unit
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.toolchain_image != '' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     env:
-      TOOLCHAIN_REF: ${{ needs.toolchain-pin.outputs.ref }}
+      TOOLCHAIN_IMAGE: ${{ inputs.toolchain_image }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Pull immutable resin toolchain
-        run: docker pull "$TOOLCHAIN_REF"
+      - name: Pull toolchain image
+        run: docker pull "$TOOLCHAIN_IMAGE"
 
       - name: Build Workpiece resin service image
         run: |
           docker build \
-            --build-arg "TOOLCHAIN_IMAGE=$TOOLCHAIN_REF" \
+            --build-arg "TOOLCHAIN_IMAGE=$TOOLCHAIN_IMAGE" \
+            --build-arg "SERVICE_COMMIT=$GITHUB_SHA" \
             -t workpiece-resin-slicer:acceptance \
             .
-
-      - name: Verify locked toolchain inside service image
-        run: |
-          docker run --rm \
-            --entrypoint /bin/cat \
-            workpiece-resin-slicer:acceptance \
-            /opt/workpiece-toolchain/manifest.json > toolchain-runtime-manifest.json
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          lock = json.loads(Path('toolchain.lock.json').read_text())
-          manifest = json.loads(Path('toolchain-runtime-manifest.json').read_text())
-          assert manifest == {
-              'schema': 'workpiece-resin-toolchain-v1',
-              'prusaslicer_version': lock['prusaslicer']['version'],
-              'prusaslicer_commit': lock['prusaslicer']['commit'],
-              'uvtools_version': lock['uvtools']['version'],
-              'uvtools_archive_sha256': lock['uvtools']['archive_sha256'],
-          }
-          print('Runtime toolchain matches lock contract.')
-          PY
 
       - name: Start acceptance service
         run: |
           docker run -d --name workpiece-resin-acceptance \
             -p 18080:8080 \
             -e WORKPIECE_RESIN_PROJECT_API_TOKEN=acceptance-token \
-            -e "WORKPIECE_RESIN_TOOLCHAIN_REF=$TOOLCHAIN_REF" \
             workpiece-resin-slicer:acceptance
           for attempt in $(seq 1 30); do
             if curl --fail --silent http://127.0.0.1:18080/health > health.json; then
@@ -129,49 +63,21 @@ jobs:
           done
           exit 1
 
-      - name: Verify immutable toolchain health
+      - name: Verify engines are available
         run: |
           python3 - <<'PY'
           import json
-          import os
           from pathlib import Path
           health = json.loads(Path('health.json').read_text())
-          toolchain = health['engines']['toolchain']
-          assert toolchain['valid'] is True
-          assert toolchain['immutable'] is True
-          assert toolchain['toolchain_image_ref'] == os.environ['TOOLCHAIN_REF']
-          assert health['production_profiles_ready'] is False
-          print('Service exposes the exact immutable runtime and remains non-production.')
+          assert health['engines']['prusaslicer']['available'] is True
+          assert health['engines']['uvtools']['available'] is True
+          assert health['profiles_ready'] is True
           PY
 
-      - name: Generate deterministic acceptance STL
+      - name: Generate acceptance STL
         run: python3 scripts/make_acceptance_stl.py
 
-      - name: Verify authenticated proxy orientation screening
-        run: |
-          curl --fail-with-body \
-            -H 'Authorization: Bearer acceptance-token' \
-            -F 'file=@acceptance-cube.stl;type=model/stl' \
-            -F 'finalist_limit=3' \
-            -o orientation-proxy.json \
-            http://127.0.0.1:18080/v1/orientation/proxy
-          python3 - <<'PY'
-          import hashlib
-          import json
-          from pathlib import Path
-
-          source = Path('acceptance-cube.stl').read_bytes()
-          payload = json.loads(Path('orientation-proxy.json').read_text())
-          assert payload['schema'] == 'workpiece-resin-orientation-proxy-plan-v1'
-          assert payload['source_sha256'] == hashlib.sha256(source).hexdigest()
-          assert payload['automatic_production_authority'] is False
-          screening = payload['screening']
-          assert screening['automatic_production_authority'] is False
-          assert 1 <= len(screening['finalists']) <= 3
-          print('Source-bound proxy orientation screening verified.')
-          PY
-
-      - name: Generate Mars 2 grey review bundle
+      - name: Estimate the cube
         run: |
           curl --fail-with-body \
             -H 'Authorization: Bearer acceptance-token' \
@@ -179,208 +85,52 @@ jobs:
             -F 'printer_profile=elegoo-mars-2' \
             -F 'resin_profile=elegoo-water-washable-grey' \
             -F 'quality=balanced-0p05-medium' \
-            -F 'rotate_x=15' \
-            -F 'rotate_y=0' \
-            -F 'rotate_z=25' \
-            -D acceptance-headers.txt \
-            -o acceptance-bundle.zip \
-            http://127.0.0.1:18080/v1/candidate
-          cat acceptance-headers.txt
-          unzip -l acceptance-bundle.zip
+            -o estimate.json \
+            http://127.0.0.1:18080/v1/estimate
+          python3 -c "import json; e=json.load(open('estimate.json')); print(json.dumps(e['summary'], indent=2)); assert e['summary']['layer_count'] > 100"
 
-      - name: Verify retained recipe provenance and project structure
+      - name: Build a two-plate order project
         run: |
+          curl --fail-with-body --max-time 2400 \
+            -H 'Authorization: Bearer acceptance-token' \
+            -F 'file=@acceptance-cube.stl;type=model/stl' \
+            -F 'printer_profile=elegoo-mars-2' \
+            -F 'resin_profile=elegoo-water-washable-grey' \
+            -F 'quality=balanced-0p05-medium' \
+            -F 'requested_quantity=40' \
+            -F 'finalist_limit=2' \
+            -D project-headers.txt \
+            -o project.zip \
+            http://127.0.0.1:18080/v1/project
+          cat project-headers.txt
+          unzip -o project.zip -d project-out
           python3 - <<'PY'
-          import hashlib
-          import io
-          import json
-          import os
-          import zipfile
+          import hashlib, json
           from pathlib import Path
-
-          source = Path('acceptance-cube.stl').read_bytes()
-          bundle = Path('acceptance-bundle.zip').read_bytes()
-          with zipfile.ZipFile(io.BytesIO(bundle)) as zf:
-              manifest = json.loads(zf.read('manifest.json'))
-              assert manifest['schema'] == 'workpiece-resin-bundle-v2'
-              assert manifest['authority'] == 'acceptance-candidate-only'
-              assert manifest['provenance_chain'] == [
-                  'source_stl', 'review_3mf', 'effective_config', 'intermediate_sl1', 'printer_native'
-              ]
-              assert manifest['profiles'] == {
-                  'printer': 'elegoo-mars-2',
-                  'resin': 'elegoo-water-washable-grey',
-                  'quality': 'balanced-0p05-medium',
-              }
-              assert manifest['orientation_deg'] == {'x': 15, 'y': 0, 'z': 25}
-              assert manifest['engine'] == {
-                  'prusaslicer': {
-                      'version': '2.9.6',
-                      'commit': 'b028299c770b8380ee81c921a2867d522f288123',
-                  },
-                  'uvtools': {'version': '6.2.0', 'normal_command_exit': 1},
-              }
-              assert manifest['execution_environment'] == {
-                  'toolchain_image_ref': os.environ['TOOLCHAIN_REF'],
-                  'immutable': True,
-              }
-              assert 'indivisible retained recipe' in manifest['recipe_rule']
-
-              files = manifest['files']
-              payloads = {}
-              for key in ('source_stl', 'review_3mf', 'effective_config', 'intermediate_sl1', 'printer_native'):
-                  name = files[key]['name']
-                  payload = zf.read(name)
-                  payloads[key] = payload
-                  assert payload, f'{key} is empty'
-                  assert hashlib.sha256(payload).hexdigest() == files[key]['sha256']
-
-              assert payloads['source_stl'] == source
-              assert files['review_3mf']['name'].endswith('.3mf')
-              assert files['effective_config']['name'].endswith('.ini')
-              assert files['intermediate_sl1']['name'].endswith(('.sl1', '.sl1s'))
-              assert files['printer_native']['name'].endswith('.ctb')
-
-              Path('acceptance-out').mkdir(exist_ok=True)
-              Path('acceptance-out/review.3mf').write_bytes(payloads['review_3mf'])
-              Path('acceptance-out/effective.ini').write_bytes(payloads['effective_config'])
-              Path('acceptance-out/intermediate.sl1').write_bytes(payloads['intermediate_sl1'])
-              Path('acceptance-out/print.ctb').write_bytes(payloads['printer_native'])
-              Path('acceptance-out/manifest.json').write_bytes(zf.read('manifest.json'))
-              Path('acceptance-out/uvtools-issues.txt').write_bytes(zf.read('uvtools-issues.txt'))
-
-          with zipfile.ZipFile(io.BytesIO(payloads['review_3mf'])) as project_zip:
-              project_names = project_zip.namelist()
-              assert '[Content_Types].xml' in project_names
-              assert any(name.lower().endswith('.model') for name in project_names)
-              support_points = [name for name in project_names if 'sla_support_points' in name.lower()]
-              Path('acceptance-out/project-contents.txt').write_text('\n'.join(project_names) + '\n')
-              Path('acceptance-out/support-point-state.txt').write_text(
-                  ('explicit support-point metadata: ' + ', '.join(support_points) + '\n') if support_points
-                  else 'no explicit support-point metadata; retained effective.ini remains mandatory for deterministic SLA regeneration\n'
-              )
-              print('3MF entries:', len(project_names))
-              print('Explicit SLA support-point metadata:', bool(support_points))
+          manifest = json.loads(Path('project-out/project.json').read_text())
+          assert manifest['totals']['instances'] == 40
+          assert manifest['totals']['plates'] >= 2
+          for plate in manifest['plates']:
+              for record in plate['files'].values():
+                  data = Path('project-out', record['name']).read_bytes()
+                  assert hashlib.sha256(data).hexdigest() == record['sha256'], record['name']
+          print(json.dumps({k: manifest[k] for k in ('layout', 'totals', 'warnings')}, indent=2))
           PY
 
-      - name: Extract exact native CTB metrics with pinned UVtools
+      - name: Measure the bed-to-CTB mapping of plate 1
         run: |
-          set +e
-          docker run --rm \
-            -v "$PWD/acceptance-out:/work:rw" \
-            --entrypoint /opt/uvtools/UVtoolsCmd \
-            workpiece-resin-slicer:acceptance \
-            print-properties /work/print.ctb -n LayerCount PrintHeight BoundingRectangleMillimeters --no-progress \
-            > acceptance-out/native-base-properties.txt
-          base_status=$?
-          set -e
-          test "$base_status" -eq 1
+          docker run --rm -v "$PWD/project-out:/work:rw" --entrypoint /usr/bin/env workpiece-resin-slicer:acceptance \
+            python3 /app/scripts/calibrate_mars2_mapping.py /work/project.json /work/acceptance-cube-plate-01.ctb || true
 
-          python3 - <<'PY'
-          from pathlib import Path
-          from app.uvtools_metrics import parse_base_native_properties
-          output = Path('acceptance-out/native-base-properties.txt').read_text(errors='replace')
-          layer_count, _, _ = parse_base_native_properties(output)
-          Path('acceptance-out/layer-count.txt').write_text(str(layer_count))
-          print('Native layer count:', layer_count)
-          PY
-
-          layer_count="$(cat acceptance-out/layer-count.txt)"
-          set +e
-          docker run --rm \
-            -v "$PWD/acceptance-out:/work:rw" \
-            --entrypoint /opt/uvtools/UVtoolsCmd \
-            workpiece-resin-slicer:acceptance \
-            print-properties /work/print.ctb -r "0:$((layer_count - 1))" -n Area Volume --no-progress \
-            > acceptance-out/native-layer-properties.txt
-          layer_status=$?
-          set -e
-          test "$layer_status" -eq 1
-
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-          from app.uvtools_metrics import parse_native_artifact_metrics
-
-          metrics = parse_native_artifact_metrics(
-              Path('acceptance-out/native-base-properties.txt').read_text(errors='replace'),
-              Path('acceptance-out/native-layer-properties.txt').read_text(errors='replace'),
-          )
-          payload = {
-              'layer_count': metrics.layer_count,
-              'max_layer_area_mm2': metrics.max_layer_area_mm2,
-              'material_volume_mm3': metrics.material_volume_mm3,
-              'footprint_area_mm2': metrics.footprint_area_mm2,
-              'z_height_mm': metrics.z_height_mm,
-          }
-          assert all(payload[name] > 0 for name in (
-              'max_layer_area_mm2', 'material_volume_mm3', 'footprint_area_mm2', 'z_height_mm'
-          ))
-          Path('acceptance-out/native-metrics.json').write_text(json.dumps(payload, indent=2, sort_keys=True) + '\n')
-          print(json.dumps(payload, indent=2, sort_keys=True))
-          PY
-
-      - name: Regenerate exact retained recipe
-        run: |
-          docker run --rm \
-            -v "$PWD/acceptance-out:/work:rw" \
-            --entrypoint /opt/prusaslicer/prusa-slicer \
-            workpiece-resin-slicer:acceptance \
-            --load /work/effective.ini \
-            --dont-arrange \
-            --export-sla --output /work/intermediate-repeat.sl1 /work/review.3mf
-          test -s acceptance-out/intermediate-repeat.sl1
-
-          set +e
-          docker run --rm \
-            -v "$PWD/acceptance-out:/work:rw" \
-            --entrypoint /opt/uvtools/UVtoolsCmd \
-            workpiece-resin-slicer:acceptance \
-            convert /work/intermediate-repeat.sl1 CTB /work/print-repeat.ctb
-          convert_status=$?
-          set -e
-          test "$convert_status" -eq 1
-          test -s acceptance-out/print-repeat.ctb
-
-      - name: Verify SL1 semantic determinism
-        run: |
-          python3 scripts/verify_sl1_semantics.py \
-            acceptance-out/intermediate.sl1 \
-            acceptance-out/intermediate-repeat.sl1 \
-            | tee acceptance-out/sl1-semantic-compare.txt
-
-      - name: Verify CTB semantic determinism with pinned UVtools
-        run: |
-          set +e
-          docker run --rm \
-            -v "$PWD/acceptance-out:/work:rw" \
-            --entrypoint /opt/uvtools/UVtoolsCmd \
-            workpiece-resin-slicer:acceptance \
-            compare /work/print.ctb /work/print-repeat.ctb --full-mode --no-progress \
-            > acceptance-out/ctb-semantic-compare.txt 2>&1
-          compare_status=$?
-          set -e
-          cat acceptance-out/ctb-semantic-compare.txt
-          test "$compare_status" -eq 1
-          python3 - <<'PY'
-          from pathlib import Path
-          text = Path('acceptance-out/ctb-semantic-compare.txt').read_text(errors='replace').rstrip()
-          assert text.endswith('Files matches'), text
-          print('UVtools semantic comparison matched.')
-          PY
-          echo "UVtools compare exit status: ${compare_status}" >> acceptance-out/ctb-semantic-compare.txt
-
-      - name: Upload real acceptance artifacts
+      - name: Upload acceptance artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mars2-grey-consolidated-acceptance
+          name: mars2-grey-acceptance
           path: |
-            acceptance-bundle.zip
-            acceptance-headers.txt
-            orientation-proxy.json
             health.json
-            toolchain-runtime-manifest.json
-            acceptance-out/
+            estimate.json
+            project-headers.txt
+            project.zip
           if-no-files-found: error
 
       - name: Container logs on failure

@@ -30,4 +30,4 @@ UVtools publishes PrusaSlicer profiles for multiple Elegoo models (for example M
 
 ## Important limitation
 
-PrusaSlicer CLI can apply explicit orientation transforms and generate SLA supports when configured, but stock CLI does not provide the same automatic orientation workflow as the GUI. Workpiece therefore records an explicit orientation proposal for the first implementation rather than claiming automatic orientation authority.
+PrusaSlicer CLI can apply explicit orientation transforms and generate SLA supports when configured, but stock CLI does not provide the same automatic orientation workflow as the GUI. Workpiece therefore implements orientation itself (geometry screening, then real slices of the finalists ranked on UVtools metrics) and lets `/v1/estimate` take an explicit orientation proposal.

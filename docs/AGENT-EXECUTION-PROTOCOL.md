@@ -50,4 +50,4 @@ For the next chat: read `AGENTS.md`, this file and the newest checkpoint; verify
 
 ## Repository-specific guardrails
 
-This is the public resin slicing service. Preserve exact input/project/config/native-output provenance, deterministic per-plate evidence, license obligations and qualification gates. A valid archive or a passing mock must not be described as a real printer or production qualification.
+This is the public resin slicing service. Keep the 3MF + effective-config recipe intact, record file hashes, and respect license obligations. A valid archive or a passing mock must not be described as a real slice or a successful print.

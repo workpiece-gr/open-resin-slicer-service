@@ -192,10 +192,11 @@ def test_real_adapter_executes_finalists_sequentially_and_retains_only_exact_win
     assert result.validation.selected_evidence is not None
     assert result.validation.selected_evidence.canonical_key == expected_winner
     assert result.selected_result is not None
-    assert result.selected_native_envelope is not None
+    assert result.selection == adapter.SELECTION_SLICED_WINNER
+    assert result.selected_native_rectangle is not None
 
     selected = result.selected_result.artifact
-    envelope = result.selected_native_envelope
+    rectangle = result.selected_native_rectangle
     assert selected.orientation.x == expected_winner[0]
     assert selected.project_bytes == f"project-{expected_token}".encode()
     assert selected.effective_config_bytes == f"config-{expected_token}".encode()
@@ -203,14 +204,7 @@ def test_real_adapter_executes_finalists_sequentially_and_retains_only_exact_win
     assert selected.bytes == f"ctb-{expected_token}".encode()
     assert hashlib.sha256(selected.project_bytes).hexdigest() == selected.project_sha256
     assert hashlib.sha256(selected.bytes).hexdigest() == selected.native_sha256
-    assert envelope.printer_native_sha256 == selected.native_sha256
-    assert envelope.printer_profile_id == PRINTER.id
-    assert envelope.coordinate_space == "uvtools-native-display-millimetres"
-    assert envelope.envelope.min_x_mm == 3
-    assert envelope.envelope.max_x_mm == 13
-    assert envelope.envelope.min_y_mm == 4
-    assert envelope.envelope.max_y_mm == 14
-    assert envelope.automatic_materialization_authority is False
+    assert (rectangle.x_mm, rectangle.y_mm, rectangle.width_mm, rectangle.height_mm) == (3, 4, 10, 10)
 
     layer_commands = [command for command, _, _ in uvtools_calls if "-r" in command]
     assert len(layer_commands) == 2
@@ -223,8 +217,8 @@ def test_critical_issue_on_one_finalist_does_not_abort_other_real_slices(monkeyp
     assert len(slice_calls) == 2
     assert result.selected_result is not None
     assert result.selected_result.artifact.orientation.x == 15
-    assert result.selected_native_envelope is not None
-    assert result.selected_native_envelope.printer_native_sha256 == result.selected_result.artifact.native_sha256
+    assert result.selected_native_rectangle is not None
+    assert result.selected_native_rectangle.width_mm in {10, 20}
     blocked = next(
         item
         for item in result.validation.decision.ranked
@@ -239,8 +233,32 @@ def test_all_blocked_finalists_return_manual_review_without_retaining_heavy_arti
     assert len(slice_calls) == 2
     assert result.validation.decision.manual_review_required is True
     assert result.selected_result is None
-    assert result.selected_native_envelope is None
+    assert result.selected_native_rectangle is None
+    assert result.selection == adapter.SELECTION_NONE
     assert result.executed_finalist_count == 2
+
+
+def test_all_blocked_finalists_can_fall_back_to_the_best_proxy_orientation(monkeypatch):
+    _install_fakes(monkeypatch, all_islands=1)
+    result = adapter.execute_real_sliced_finalists(
+        proxy_plan=_plan(),
+        source_stl=SOURCE,
+        original_name="part.stl",
+        printer=PRINTER,
+        resin=RESIN,
+        quality=QUALITY,
+        prusa_bin="/opt/prusa",
+        uvtools_cmd="/opt/uvtools",
+        slice_timeout=240,
+        uvtools_timeout=120,
+        fallback_to_proxy_best=True,
+    )
+    assert result.validation.decision.manual_review_required is True
+    assert result.selection == adapter.SELECTION_PROXY_FALLBACK
+    best_proxy = _plan().screening.finalists[0].candidate.spec.canonical_key
+    assert result.selected_result is not None
+    assert result.selected_result.artifact.orientation.x == best_proxy[0]
+    assert result.selected_native_rectangle is not None
 
 
 def test_native_metric_format_change_fails_closed(monkeypatch):
