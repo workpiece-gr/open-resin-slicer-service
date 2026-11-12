@@ -63,10 +63,10 @@ def test_split_toolchain_keeps_engine_pins_out_of_normal_service_build():
     assert "git clone https://github.com/prusa3d/PrusaSlicer.git" not in service_dockerfile
     assert "make -j" not in service_dockerfile
 
-    assert "PRUSA_SLICER_VERSION=2.9.6" in toolchain_dockerfile
-    assert "b028299c770b8380ee81c921a2867d522f288123" in toolchain_dockerfile
-    assert "UVTOOLS_VERSION=6.2.0" in toolchain_dockerfile
-    assert "cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f" in toolchain_dockerfile
+    assert "PRUSA_SLICER_VERSION=2.9.7" in toolchain_dockerfile
+    assert "450d70dd81c9b8990bc6bc8e690e31f82ddceb11" in toolchain_dockerfile
+    assert "UVTOOLS_VERSION=7.1.2" in toolchain_dockerfile
+    assert "4d06ec7e86043c409d81126311c5c8e6f4629eb5bb9d3f092d8ec2401d157c1c" in toolchain_dockerfile
     assert "sha256sum -c" in toolchain_dockerfile
 
 

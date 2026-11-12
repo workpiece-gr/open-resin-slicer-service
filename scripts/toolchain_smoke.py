@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -15,7 +16,9 @@ WORK = ROOT / ".toolchain-smoke"
 PROFILES = ROOT / "profiles"
 MAX_OUTPUT = 20_000
 MARS2_DISPLAY_CENTER = "41.31,65.28"
-UVTOOLS_SUCCESS_EXIT = 1  # pinned UVtools 6.2.0 Program.Main returns 1 after normal command execution
+
+sys.path.insert(0, str(ROOT))
+from app.engine import UVTOOLS_SUCCESS_EXIT  # noqa: E402  (UVtools 7.x exits 0 after a normal command)
 
 
 def sha256(path: Path) -> str:
@@ -141,7 +144,8 @@ def main() -> int:
             report,
             "native-ctb",
             "/opt/uvtools/UVtoolsCmd",
-            ["convert", "/work/production.sl1", "auto", "/work/production.ctb"],
+            # "auto" ignores the output argument and writes /work/production.ctb next to the input.
+            ["--no-progress", "convert", "/work/production.sl1", "auto", "/work/production.ctb"],
             expected_returncode=UVTOOLS_SUCCESS_EXIT,
         )
         native_ok = require_file(report, "production.ctb") and native_ok
@@ -153,8 +157,8 @@ def main() -> int:
             "native-base-properties",
             "/opt/uvtools/UVtoolsCmd",
             [
-                "print-properties", "/work/production.ctb", "-n",
-                "LayerCount", "PrintHeight", "BoundingRectangleMillimeters", "--no-progress",
+                "--no-progress", "print-properties", "/work/production.ctb", "-n",
+                "LayerCount", "PrintHeight", "BoundingRectangleMillimeters",
             ],
             expected_returncode=UVTOOLS_SUCCESS_EXIT,
         )
@@ -177,8 +181,8 @@ def main() -> int:
                     "native-layer-properties",
                     "/opt/uvtools/UVtoolsCmd",
                     [
-                        "print-properties", "/work/production.ctb", "-r", f"0:{sample_end}",
-                        "-n", "Area", "Volume", "--no-progress",
+                        "--no-progress", "print-properties", "/work/production.ctb", "-r", f"0:{sample_end}",
+                        "-n", "Area", "Volume",
                     ],
                     expected_returncode=UVTOOLS_SUCCESS_EXIT,
                 )
@@ -199,7 +203,7 @@ def main() -> int:
             report,
             "native-issues",
             "/opt/uvtools/UVtoolsCmd",
-            ["print-issues", "/work/production.ctb", "--no-progress"],
+            ["--no-progress", "print-issues", "/work/production.ctb"],
             expected_returncode=UVTOOLS_SUCCESS_EXIT,
         )
         (WORK / "issues.txt").write_text(report["steps"][-1]["output_tail"], encoding="utf-8")

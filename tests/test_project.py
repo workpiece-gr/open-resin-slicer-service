@@ -145,7 +145,7 @@ def test_fifteen_small_parts_fill_one_plate(client, monkeypatch):
     assert manifest["orientation"]["finalists_sliced"] == 2
     assert manifest["part"]["supported_footprint_mm"] == {"width": 20.0, "depth": 20.0}
     assert manifest["part"]["model_volume_ml"] == 8.0
-    assert manifest["engine"]["prusaslicer"] == "2.9.6" and manifest["engine"]["uvtools"] == "6.2.0"
+    assert manifest["engine"]["prusaslicer"] == "2.9.7" and manifest["engine"]["uvtools"] == "7.1.2"
     assert manifest["profile"]["normalExposureS"] == 2.75 and manifest["profile"]["initialLayers"] == 5
     assert manifest["source"] == {"filename": "part.stl", "sha256": hashlib.sha256(box_stl(20, 20, 20)).hexdigest(), "requested_quantity": 15}
 

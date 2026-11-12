@@ -27,9 +27,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.engine import UVTOOLS_SUCCESS_EXIT  # noqa: E402
 from app.uvtools_metrics import base_property_command, parse_native_bounding_rectangle  # noqa: E402
-
-UVTOOLS_SUCCESS_EXIT = 1
 
 
 def planned_union(manifest: dict, plate_index: int) -> tuple[float, float, float, float]:

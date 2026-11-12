@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 # Normal Workpiece resin-service builds never compile PrusaSlicer.
-# Build Dockerfile.toolchain once (PrusaSlicer 2.9.6 + UVtools 6.2.0, 1-2 h) and pass its
+# Build Dockerfile.toolchain once (PrusaSlicer 2.9.7 + UVtools 7.1.2, 1-2 h) and pass its
 # image as TOOLCHAIN_IMAGE; the host records that image id in its images lock.
 ARG TOOLCHAIN_IMAGE=workpiece-resin-toolchain:local
 FROM ${TOOLCHAIN_IMAGE}

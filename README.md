@@ -1,6 +1,6 @@
 # Open Resin Slicer Service
 
-Open-source HTTP service for Workpiece MSLA/resin slicing (PrusaSlicer 2.9.6 + UVtools 6.2.0). It is isolated from the production FDM OrcaSlicer service and has two jobs:
+Open-source HTTP service for Workpiece MSLA/resin slicing (PrusaSlicer 2.9.7 + UVtools 7.1.2). It is isolated from the production FDM OrcaSlicer service and has two jobs:
 
 - **`POST /v1/estimate` — per part.** Measures one STL in a proposed orientation for an instant quote: layers, print time, resin volume, footprint, UVtools issues. JSON only, nothing retained.
 - **`POST /v1/project` — per order.** Orients the part automatically, packs the ordered quantity on as few ELEGOO Mars 2 plates as possible, slices every plate and returns a ZIP with one PrusaSlicer 3MF and one CTB per plate plus `project.json`. The workshop opens and reviews every plate project in PrusaSlicer before printing.
@@ -71,8 +71,8 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## Pinned engines and container
 
-- PrusaSlicer `2.9.6`, source commit `b028299c770b8380ee81c921a2867d522f288123`
-- UVtools `6.2.0`, Linux x64 ZIP SHA-256 `cf0ce15f78f33a1e59d3948d224bc060bcbba2171e669513dcd2d6af92d2e90f`
+- PrusaSlicer `2.9.7`, source commit `450d70dd81c9b8990bc6bc8e690e31f82ddceb11` (tag `version_2.9.7`)
+- UVtools `7.1.2`, Linux x64 ZIP SHA-256 `4d06ec7e86043c409d81126311c5c8e6f4629eb5bb9d3f092d8ec2401d157c1c`
 
 `Dockerfile.toolchain` builds both from those pins (1–2 h). `Dockerfile` builds the service on top of that image (`--build-arg TOOLCHAIN_IMAGE=...`, optional `SERVICE_COMMIT`). The toolchain workflow verifies the toolchain image builds and runs a Mars 2 smoke slice; the service CI runs the unit tests on every push and, on dispatch with a toolchain image, a real estimate + two-plate project.
 

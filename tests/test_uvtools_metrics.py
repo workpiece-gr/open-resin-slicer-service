@@ -101,18 +101,20 @@ def test_layer_parser_requires_exact_layer_coverage_and_properties():
 
 
 def test_commands_are_bounded_and_request_only_authoritative_properties():
+    # UVtools 7 rejects --no-progress after the subcommand; it must lead.
     assert base_property_command("/opt/uvtools/UVtoolsCmd", "/tmp/part.ctb") == (
         "/opt/uvtools/UVtoolsCmd",
+        "--no-progress",
         "print-properties",
         "/tmp/part.ctb",
         "-n",
         "LayerCount",
         "PrintHeight",
         "BoundingRectangleMillimeters",
-        "--no-progress",
     )
     assert layer_property_command("UVtoolsCmd", "part.ctb", layer_count=3) == (
         "UVtoolsCmd",
+        "--no-progress",
         "print-properties",
         "part.ctb",
         "-r",
@@ -120,7 +122,6 @@ def test_commands_are_bounded_and_request_only_authoritative_properties():
         "-n",
         "Area",
         "Volume",
-        "--no-progress",
     )
     with pytest.raises(UVtoolsMetricError):
         layer_property_command("UVtoolsCmd", "part.ctb", layer_count=0)
