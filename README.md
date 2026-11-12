@@ -22,7 +22,7 @@ STL -> PrusaSlicer review 3MF + effective config -> SLA slice (.sl1) -> UVtools 
 3. **Materialize.** The winner's review 3MF has one build item; it is cloned once per instance at the planned position, so every instance shares the winner's support points (`prusa_3mf_instances.py`).
 4. **Slice each plate** with the retained effective config, convert to CTB, inspect and measure with UVtools (`materialized_plate_slice.py`).
 
-Instance positions are PrusaSlicer bed millimetres from the lower-left corner, with the envelope centred in the 82.62 x 130.56 mm bed. The footprint is assumed centred on the model centre (PrusaSlicer placed it at `--center`). The bed-to-CTB mirror mapping has not been measured yet; `scripts/calibrate_mars2_mapping.py` does that from a real plate.
+Instance positions are PrusaSlicer bed millimetres from the lower-left corner, with the envelope centred in the 82.62 x 130.56 mm bed. The footprint is the measured cured rectangle (UVtools), converted from raster to bed millimetres (X mirrored, Y downward: measured on a real Mars 2 project, other mirror combinations are refused) and never assumed to be centred on the bed; instances whose footprint would leave the bed are refused before PrusaSlicer is called. `scripts/diagnose_project_slice.py` prints what PrusaSlicer was given and said for one STL and quantity.
 
 ## API
 

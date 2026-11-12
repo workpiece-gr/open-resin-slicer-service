@@ -22,6 +22,7 @@ from app.engine import NativeArtifact
 from app.materialized_plate_slice import MaterializedPlateNativeArtifact
 from app.uvtools_metrics import NativeArtifactMetrics, NativeBoundingRectangle
 from tests.test_estimate import EFFECTIVE_CONFIG, PROFILES, box_stl
+from app.prusa_3mf_instances import _to_matrix
 from tests.test_prusa_3mf_instances import _project as review_3mf, _transforms
 
 TUPLE = {"printer_profile": "elegoo-mars-2", "resin_profile": "elegoo-water-washable-grey", "quality": "balanced-0p05-medium"}
@@ -29,7 +30,7 @@ AUTH = {"Authorization": "Bearer test-token"}
 REVIEW_3MF = review_3mf()
 
 
-def _fake_engines(monkeypatch, *, footprint=(20.0, 20.0), islands=0, layers_per_plate=600):
+def _fake_engines(monkeypatch, *, footprint=(20.0, 20.0), islands=0, layers_per_plate=600, source_project=REVIEW_3MF, native_origin=(31.31, 55.28)):
     """Install fakes for the two external-engine calls; return the recorded plate slices."""
     width, depth = footprint
     plate_calls: list[dict] = []
@@ -39,7 +40,7 @@ def _fake_engines(monkeypatch, *, footprint=(20.0, 20.0), islands=0, layers_per_
         o = kwargs["orientation"]
         native = f"ctb-{o.x}-{o.y}-{o.z}".encode()
         return NativeArtifact(
-            project_bytes=REVIEW_3MF, project_filename="r.3mf", project_sha256=hashlib.sha256(REVIEW_3MF).hexdigest(),
+            project_bytes=source_project, project_filename="r.3mf", project_sha256=hashlib.sha256(source_project).hexdigest(),
             intermediate_bytes=b"sl1", intermediate_filename="i.sl1", bytes=native, filename="part.ctb",
             media_type="application/octet-stream", source_sha256=hashlib.sha256(source).hexdigest(),
             intermediate_sha256=hashlib.sha256(b"sl1").hexdigest(), native_sha256=hashlib.sha256(native).hexdigest(),
@@ -52,7 +53,7 @@ def _fake_engines(monkeypatch, *, footprint=(20.0, 20.0), islands=0, layers_per_
     def fake_uvtools(command, *, timeout, action):
         if "-r" in command:
             return "# Layer: 0\nArea: 400\nVolume: 20\n# Layer: 1\nArea: 400\nVolume: 20\n"
-        return f"LayerCount: 2\nPrintHeight: 30\nBoundingRectangleMillimeters: {{X=31.31,Y=55.28,Width={width},Height={depth}}}\n"
+        return f"LayerCount: 2\nPrintHeight: 30\nBoundingRectangleMillimeters: {{X={native_origin[0]},Y={native_origin[1]},Width={width},Height={depth}}}\n"
 
     def fake_plate_slice(**kwargs):
         plate_calls.append(kwargs)
@@ -251,3 +252,55 @@ def test_project_real_two_plate_run_of_20mm_cubes(client):
         assert len(members[plate["files"]["printer_native"]["name"]]) > 1000
         observed = plate["observed_footprint_mm"]
         assert observed["width"] <= 82.62 and observed["depth"] <= 130.56
+
+
+# Real numbers measured on the host (2026-11-12, Mars 2, 40 x 30 x 20 mm box standing on its 40 x 20 face): the retained 3MF
+# item sits at (21.31, 50.28), NOT at the bed centre (41.31, 65.28), and UVtools measured the cured footprint at
+# x 38.5, y 66.25, 44.12 x 26.83 in raster millimetres. The old code assumed the footprint was centred on the bed and
+# placed every instance 20 mm / 15 mm off, outside the bed, so PrusaSlicer printed "Nothing to print".
+BED = (82.62, 130.56)
+
+
+def transform_matrix(values):
+    return _to_matrix(values)
+MEASURED_PROJECT = review_3mf(transform="1 0 0 0 1 0 0 0 1 21.31 50.28 15")
+
+
+def test_native_rectangle_is_converted_to_bed_millimetres_with_the_measured_mirror():
+    rectangle = NativeBoundingRectangle(x_mm=38.5, y_mm=66.25, width_mm=44.12, height_mm=26.83)
+    envelope = project_module.bed_envelope_from_native_rectangle(rectangle, bed_width_mm=BED[0], bed_depth_mm=BED[1], mirror_x=True, mirror_y=False)
+    assert (envelope.min_x_mm, envelope.max_x_mm, envelope.min_y_mm, envelope.max_y_mm) == (0.0, 44.12, 37.48, 64.31)
+    for mirror_x, mirror_y in ((False, False), (True, True), (False, True)):
+        with pytest.raises(project_module.ProjectError, match="only measured"):
+            project_module.bed_envelope_from_native_rectangle(rectangle, bed_width_mm=BED[0], bed_depth_mm=BED[1], mirror_x=mirror_x, mirror_y=mirror_y)
+
+
+@pytest.mark.parametrize("quantity", [1, 6, 15])
+def test_every_instance_footprint_lies_inside_the_bed_when_the_source_part_is_off_centre(client, monkeypatch, quantity):
+    plate_calls = _fake_engines(monkeypatch, footprint=(44.12, 26.83), source_project=MEASURED_PROJECT, native_origin=(38.5, 66.25))
+    response = post(client, quantity=quantity)
+    assert response.status_code == 200, response.text
+    # Where the cured footprint's centre sits in the source object's own frame: raster rectangle -> bed millimetres, minus the item translation.
+    local_x, local_y = (BED[0] - (38.5 + 44.12 / 2)) - 21.31, (BED[1] - (66.25 + 26.83 / 2)) - 50.28
+    seen = 0
+    for call in plate_calls:
+        for transform in _transforms(call["project_bytes"]):
+            matrix = transform_matrix(transform)
+            # the footprint centre after the materialized transform (this is the planned target)
+            centre_x = matrix[0][0] * local_x + matrix[0][1] * local_y + matrix[0][3]
+            centre_y = matrix[1][0] * local_x + matrix[1][1] * local_y + matrix[1][3]
+            rotated = abs(matrix[0][0]) < 1e-9
+            width, depth = (26.83, 44.12) if rotated else (44.12, 26.83)
+            assert width / 2 - 1e-6 <= centre_x <= BED[0] - width / 2 + 1e-6, (transform, centre_x)
+            assert depth / 2 - 1e-6 <= centre_y <= BED[1] - depth / 2 + 1e-6, (transform, centre_y)
+            seen += 1
+    assert seen == quantity
+
+
+def test_a_plate_with_a_footprint_outside_the_bed_is_refused_with_the_numbers():
+    placements = (project_module.DisplayInstancePlacement(instance_index=1, target_display_x_mm=6.37, target_display_y_mm=2.195, rotation_z_deg=0),)
+    rectangle = NativeBoundingRectangle(x_mm=38.5, y_mm=66.25, width_mm=44.12, height_mm=26.83)
+    prepared = type("P", (), {"bed_width_mm": BED[0], "bed_depth_mm": BED[1]})()
+    with pytest.raises(project_module.ProjectError, match=r"MATERIALIZE|outside the 82.62 x 130.56 mm bed") as caught:
+        project_module._require_footprints_inside_bed(1, placements, rectangle, prepared)
+    assert caught.value.code == "MATERIALIZE_FAILED" and "x -15.69..28.43" in str(caught.value)

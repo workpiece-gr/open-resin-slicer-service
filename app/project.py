@@ -197,6 +197,66 @@ def _file_record(name: str, data: bytes) -> dict:
     return {"name": name, "sha256": _sha(data), "bytes": len(data)}
 
 
+def _printer_flag(printer: Profile, key: str) -> bool:
+    """A boolean printer setting (``display_mirror_x = 1``) from the printer's PrusaSlicer ini."""
+    try:
+        for line in printer.config.read_text(encoding="utf-8").splitlines():
+            name, separator, value = line.partition("=")
+            if separator and name.strip() == key:
+                return value.strip() == "1"
+    except OSError as exc:
+        raise ProjectError("UNSUPPORTED_PROFILE", f"Cannot read the printer configuration: {exc}") from exc
+    return False
+
+
+def bed_envelope_from_native_rectangle(
+    rectangle,
+    *,
+    bed_width_mm: float,
+    bed_depth_mm: float,
+    mirror_x: bool,
+    mirror_y: bool,
+) -> Envelope2D:
+    """The measured cured footprint as a rectangle in PrusaSlicer bed millimetres (lower-left origin).
+
+    UVtools reports the whole-print rectangle in raster ("display") millimetres: the origin is the top-left
+    pixel and Y grows downward, and the printer's ``display_mirror_x`` mirrors the raster horizontally. The
+    PrusaSlicer bed (and every 3MF build-item transform) has its origin at the lower-left corner with Y growing
+    upward. Measured on a real Mars 2 project (``display_mirror_x = 1``, ``display_mirror_y = 0``, 2026-11-12):
+    the cured footprint seen in the raster at x 38.5..82.62, y 66.25..93.08 belongs to an object whose 3MF
+    centre is at bed (21.31, 50.28), so ``display_x = bed_width - bed_x`` and ``display_y = bed_depth - bed_y``.
+    Only that combination has been measured; any other combination is refused rather than guessed.
+
+    The footprint is NOT assumed to be centred on the bed: PrusaSlicer's exported item sits wherever its
+    placement put it, and supports and the pad shift the cured rectangle against the mesh.
+    """
+    if not mirror_x or mirror_y:
+        raise ProjectError(
+            "UNSUPPORTED_PROFILE",
+            "The bed-to-raster mapping is only measured for printers with display_mirror_x = 1 and display_mirror_y = 0.",
+        )
+    return Envelope2D(
+        min_x_mm=round(bed_width_mm - rectangle.max_x_mm, 6),
+        max_x_mm=round(bed_width_mm - rectangle.x_mm, 6),
+        min_y_mm=round(bed_depth_mm - rectangle.max_y_mm, 6),
+        max_y_mm=round(bed_depth_mm - rectangle.y_mm, 6),
+    )
+
+
+def _require_footprints_inside_bed(plate_index, placements, rectangle, prepared: ProjectInput) -> None:
+    """Never hand PrusaSlicer a plate it will silently skip: every instance's footprint must lie inside the bed."""
+    for item in placements:
+        width, depth = (rectangle.height_mm, rectangle.width_mm) if item.rotation_z_deg % 180 == 90 else (rectangle.width_mm, rectangle.height_mm)
+        low_x, high_x = item.target_display_x_mm - width / 2.0, item.target_display_x_mm + width / 2.0
+        low_y, high_y = item.target_display_y_mm - depth / 2.0, item.target_display_y_mm + depth / 2.0
+        if low_x < -1e-6 or low_y < -1e-6 or high_x > prepared.bed_width_mm + 1e-6 or high_y > prepared.bed_depth_mm + 1e-6:
+            raise ProjectError(
+                "MATERIALIZE_FAILED",
+                f"Plate {plate_index} instance {item.instance_index}: footprint x {low_x:.2f}..{high_x:.2f}, y {low_y:.2f}..{high_y:.2f} mm "
+                f"is outside the {prepared.bed_width_mm} x {prepared.bed_depth_mm} mm bed.",
+            )
+
+
 def build_order_project(
     prepared: ProjectInput,
     *,
@@ -264,11 +324,12 @@ def build_order_project(
         ) from exc
 
     offset_x, offset_y = prepared.envelope_offset_mm
-    source_envelope = Envelope2D(
-        min_x_mm=prepared.bed_width_mm / 2.0 - rectangle.width_mm / 2.0,
-        max_x_mm=prepared.bed_width_mm / 2.0 + rectangle.width_mm / 2.0,
-        min_y_mm=prepared.bed_depth_mm / 2.0 - rectangle.height_mm / 2.0,
-        max_y_mm=prepared.bed_depth_mm / 2.0 + rectangle.height_mm / 2.0,
+    source_envelope = bed_envelope_from_native_rectangle(
+        rectangle,
+        bed_width_mm=prepared.bed_width_mm,
+        bed_depth_mm=prepared.bed_depth_mm,
+        mirror_x=_printer_flag(printer, "display_mirror_x"),
+        mirror_y=_printer_flag(printer, "display_mirror_y"),
     )
     cycle = cycle_profile(resin, selected.effective_config_bytes)
     mesh = mesh_stats(source, Orientation(orientation.x, orientation.y, orientation.z))
@@ -287,6 +348,7 @@ def build_order_project(
             )
             for item in plate.placements
         )
+        _require_footprints_inside_bed(plate.plate_index, placements, rectangle, prepared)
         try:
             project = materialize_prusa_project_instances(
                 selected.project_bytes,
