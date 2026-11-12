@@ -364,7 +364,11 @@ def slice_native(
             if len(candidates) == 1:
                 intermediate_path = candidates[0]
             else:
-                raise EngineError("PrusaSlicer did not produce the expected SLA archive from the retained recipe.")
+                listing = sorted(f"{item.name} ({item.stat().st_size} bytes)" for item in root.iterdir())
+                raise EngineError(
+                    "PrusaSlicer did not produce the expected SLA archive from the retained recipe. "
+                    f"Directory: {listing}. PrusaSlicer output (last 2000 characters): {sliced.stdout[-2000:]}"
+                )
 
         native_path = uvtools_native_output_path(intermediate_path, native_format)
         conversion = _run(

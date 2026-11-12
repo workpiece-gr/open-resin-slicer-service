@@ -194,8 +194,10 @@ def slice_materialized_plate_native(
             if len(candidates) == 1:
                 intermediate_path = candidates[0]
             else:
+                listing = sorted(f"{item.name} ({item.stat().st_size} bytes)" for item in root.iterdir())
                 raise MaterializedPlateSliceError(
-                    "PrusaSlicer did not produce the expected SLA archive from the exact materialized plate."
+                    "PrusaSlicer did not produce the expected SLA archive from the exact materialized plate. "
+                    f"Directory: {listing}. PrusaSlicer output (last 2000 characters): {sliced.stdout[-2000:]}"
                 )
 
         native_path = uvtools_native_output_path(intermediate_path, native_format)
