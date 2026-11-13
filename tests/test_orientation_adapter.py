@@ -294,3 +294,62 @@ def test_source_mismatch_is_rejected_before_real_slicer_runs(monkeypatch):
             uvtools_timeout=120,
         )
     assert slice_calls == []
+
+
+# ---- build orientation rule (opus decision (c), issue #15): the proxy-best finalist wins whenever it is clean -----------------
+
+def test_clean_proxy_best_is_the_build_orientation_even_if_another_finalist_is_clean_too(monkeypatch):
+    _install_fakes(monkeypatch)    # every finalist clean
+    result = _execute_with_fallback()
+    best_proxy = _plan().screening.finalists[0].candidate.spec.canonical_key
+    assert result.selection == adapter.SELECTION_SLICED_WINNER and result.deviation_reason is None
+    assert result.selected_result.artifact.orientation.x == best_proxy[0], "quote = build: the proxy order decides among clean finalists"
+
+
+def test_a_critical_proxy_best_hands_over_to_the_next_clean_finalist_and_says_so(monkeypatch):
+    _install_fakes(monkeypatch, second_islands=2)    # the 15 degree finalist (proxy best) has 2 critical findings, the 0 degree one is clean
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_DEVIATED
+    assert result.selected_result.artifact.orientation.x == 0
+    assert "proxy-best orientation" in result.deviation_reason and "2 critical" in result.deviation_reason and "instant quote" in result.deviation_reason
+
+
+# ---- the finalist's issue report comes from a slice centred on the bed (issue #15, TouchingBound artefact) ---------------------
+
+def test_the_issue_report_is_taken_from_a_single_instance_centred_on_the_bed(monkeypatch):
+    seen = {}
+    printer = Profile(id="p", kind="printer", label="p", candidate_ready=True, production_ready=False, config=Path("/none.ini"),
+                      metadata={"display_width_mm": 82.62, "display_height_mm": 130.56})
+    monkeypatch.setattr(adapter, "printer_flag", lambda p, key: key == "display_mirror_x")
+
+    def fake_materialize(project_bytes, *, source_project_sha256, source_display_envelope, placements):
+        seen["envelope"], seen["placements"] = source_display_envelope, placements
+        return type("M", (), {"bytes": b"centred", "sha256": "c" * 64})()
+
+    def fake_slice(**kwargs):
+        seen["slice"] = kwargs
+        return type("S", (), {"issue_summary": {"islands": 1, "touching_bounds": 0}, "issue_text": "Issues: 1\nIsland, 103, 1px², {}\n"})()
+
+    monkeypatch.setattr(adapter, "materialize_prusa_project_instances", fake_materialize)
+    monkeypatch.setattr(adapter, "slice_materialized_plate_native", fake_slice)
+    artifact = _artifact(Orientation(0, 0, 0))
+    rectangle = adapter.NativeBoundingRectangle(x_mm=38.5, y_mm=66.25, width_mm=44.12, height_mm=26.83)   # the measured raster rectangle
+    summary, text = adapter._centred_issue_report(artifact, rectangle, printer=printer, prusa_bin="/p", uvtools_cmd="/u", slice_timeout=1, uvtools_timeout=1)
+    (placement,) = seen["placements"]
+    assert (placement.target_display_x_mm, placement.target_display_y_mm, placement.rotation_z_deg) == (41.31, 65.28, 0), "the bed centre, one instance"
+    assert (seen["envelope"].min_x_mm, seen["envelope"].max_x_mm, seen["envelope"].min_y_mm, seen["envelope"].max_y_mm) == (0.0, 44.12, 37.48, 64.31), "the same measured conversion the plates use"
+    assert seen["slice"]["project_bytes"] == b"centred" and seen["slice"]["reject_critical"] is False
+    assert summary == {"islands": 1, "touching_bounds": 0} and "Island, 103" in text
+
+
+def test_without_the_measured_mapping_the_finalists_own_report_is_kept(monkeypatch):
+    artifact = _artifact(Orientation(0, 0, 0))
+    rectangle = adapter.NativeBoundingRectangle(x_mm=1, y_mm=1, width_mm=10, height_mm=10)
+    assert adapter._centred_issue_report(artifact, rectangle, printer=PRINTER, prusa_bin="/p", uvtools_cmd="/u", slice_timeout=1, uvtools_timeout=1) is None
+
+
+def test_a_centred_report_replaces_the_finalists_own_issue_counts_in_the_evidence(monkeypatch):
+    _install_fakes(monkeypatch, all_islands=1)
+    monkeypatch.setattr(adapter, "_centred_issue_report", lambda *a, **k: ({"islands": 0, "overhangs": 0, "resin_traps": 0, "suction_cups": 0, "touching_bounds": 0, "empty_layers": 0}, "Issues: 0\n"))
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_SLICED_WINNER, "the centred slices are clean, so no critical-issue fallback"

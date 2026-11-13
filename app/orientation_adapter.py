@@ -15,7 +15,11 @@ from .engine import (
     Orientation,
     slice_native,
 )
+from .bed_frame import BedFrameError, bed_envelope_from_native_rectangle, printer_flag
 from .issue_triage import support_lift_layers, triage_issue_summary
+from .materialized_plate_slice import MaterializedPlateSliceError, slice_materialized_plate_native
+from .placement import PlacementError
+from .prusa_3mf_instances import DisplayInstancePlacement, ThreeMFMaterializationError, materialize_prusa_project_instances
 from .orientation_execute import (
     FinalistSliceResult,
     SlicedMeasurements,
@@ -40,6 +44,7 @@ class SlicedFinalistAdapterError(RuntimeError):
 
 
 SELECTION_SLICED_WINNER = "sliced-winner"
+SELECTION_DEVIATED = "deviated-from-proxy"
 SELECTION_LEAST_CRITICAL = "sliced-least-critical"
 SELECTION_PROXY_FALLBACK = "proxy-best-fallback"
 SELECTION_NONE = "manual-review-required"
@@ -59,6 +64,7 @@ class RealSlicedFinalistExecution:
     selected_native_rectangle: NativeBoundingRectangle | None
     executed_finalist_count: int
     selection: str = SELECTION_NONE
+    deviation_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +214,38 @@ def _restore_spooled_artifact(item: _SpooledFinalist) -> NativeArtifact:
     return artifact
 
 
+def _centred_issue_report(artifact: NativeArtifact, rectangle, *, printer, prusa_bin, uvtools_cmd, slice_timeout, uvtools_timeout):
+    """UVtools' issue report for the finalist as the plate path would slice it: ONE instance centred on the bed.
+
+    The finalist's own slice sits wherever PrusaSlicer exported it (on the Mars 2 test part 20 mm / 15 mm off the bed
+    centre, so the pad touched the display edge: TouchingBound on layers 0 to 8, issue #15), a frame no plate ever
+    uses. The exported project is materialized with the same measured-rectangle transform the plates use (project
+    placement, ``prusa_3mf_instances``) and sliced again, so the cured footprint centre lands on the bed centre by
+    construction. Returns (issue_summary, issue_text), or None when it cannot be done (the finalist's own report is
+    kept; the printer lacks the measured mapping or the engine refused).
+    """
+    try:
+        width, depth = float(printer.metadata["display_width_mm"]), float(printer.metadata["display_height_mm"])
+        envelope = bed_envelope_from_native_rectangle(
+            rectangle, bed_width_mm=width, bed_depth_mm=depth,
+            mirror_x=printer_flag(printer, "display_mirror_x"), mirror_y=printer_flag(printer, "display_mirror_y"),
+        )
+        centred = DisplayInstancePlacement(instance_index=1, target_display_x_mm=width / 2, target_display_y_mm=depth / 2, rotation_z_deg=0)
+        project = materialize_prusa_project_instances(
+            artifact.project_bytes, source_project_sha256=artifact.project_sha256,
+            source_display_envelope=envelope, placements=(centred,),
+        )
+        sliced = slice_materialized_plate_native(
+            project_bytes=project.bytes, project_sha256=project.sha256,
+            effective_config_bytes=artifact.effective_config_bytes, effective_config_sha256=artifact.effective_config_sha256,
+            printer=printer, prusa_bin=prusa_bin, uvtools_cmd=uvtools_cmd,
+            slice_timeout=slice_timeout, uvtools_timeout=uvtools_timeout, reject_critical=False,
+        )
+    except (KeyError, TypeError, ValueError, OSError, BedFrameError, PlacementError, ThreeMFMaterializationError, MaterializedPlateSliceError):
+        return None
+    return dict(sliced.issue_summary), sliced.issue_text
+
+
 def _critical_count(evidence) -> int:
     return (
         evidence.unresolved_islands + evidence.unresolved_suction_cups + evidence.unresolved_resin_traps
@@ -298,6 +336,11 @@ def execute_real_sliced_finalists(
                 uvtools_timeout=uvtools_timeout,
             )
             # UVtools reports one island on the first model layer of any part with a flat underside (it rests on the support tips): information, not a print risk (app/issue_triage.py).
+            centred_report = _centred_issue_report(
+                artifact, metrics.bounding_rectangle, printer=printer, prusa_bin=prusa_bin, uvtools_cmd=uvtools_cmd,
+                slice_timeout=slice_timeout, uvtools_timeout=uvtools_timeout,
+            )
+            report_summary, report_text = centred_report if centred_report else (artifact.issue_summary, artifact.issue_text)
             try:
                 lift_layers = support_lift_layers(
                     metrics.z_height_mm,
@@ -308,7 +351,8 @@ def execute_real_sliced_finalists(
                 lift_layers = None   # cannot tell where the support region ends: nothing is excused
             artifact = replace(
                 artifact,
-                issue_summary=triage_issue_summary(artifact.issue_summary, artifact.issue_text, lift_layers=lift_layers),
+                issue_summary=triage_issue_summary(report_summary, report_text, lift_layers=lift_layers),
+                issue_text=report_text,
             )
             measurements = SlicedMeasurements(
                 source_sha256=artifact.source_sha256,
@@ -342,21 +386,32 @@ def execute_real_sliced_finalists(
             execute_finalist=execute_one,
         )
 
-        selected = execution.validation.selected_evidence
-        if selected is not None:
-            selected_key = selected.canonical_key
-            selection = SELECTION_SLICED_WINNER
-        elif fallback_to_proxy_best:
-            # Every finalist still has critical findings: take the one with the fewest (ties go to the proxy ranking order); the project warns only because THIS winner is still critical.
-            selected_key = fewest_critical_finalist(execution.validation.evidence).canonical_key
-            selection = SELECTION_LEAST_CRITICAL
+        deviation_reason = None
+        if fallback_to_proxy_best:
+            # The build orientation is the proxy-best finalist whenever it is clean (that is the orientation the instant quote measures); only when it still has
+            # critical findings does the build take the next clean finalist (proxy order), and when none is clean the one with the fewest.
+            evidence = execution.validation.evidence
+            clean = [item for item in evidence if _critical_count(item) == 0]
+            if clean and clean[0] is evidence[0]:
+                selected_key, selection = clean[0].canonical_key, SELECTION_SLICED_WINNER
+            elif clean:
+                selected_key, selection = clean[0].canonical_key, SELECTION_DEVIATED
+                deviation_reason = (
+                    f"The proxy-best orientation {evidence[0].canonical_key} still had {_critical_count(evidence[0])} critical UVtools finding(s); "
+                    f"the next clean orientation {clean[0].canonical_key} was used. The instant quote measured the proxy-best orientation, so it may differ from this build."
+                )
+            else:
+                selected_key, selection = fewest_critical_finalist(evidence).canonical_key, SELECTION_LEAST_CRITICAL
         else:
-            return RealSlicedFinalistExecution(
-                validation=execution.validation,
-                selected_result=None,
-                selected_native_rectangle=None,
-                executed_finalist_count=len(spooled),
-            )
+            selected = execution.validation.selected_evidence
+            if selected is None:
+                return RealSlicedFinalistExecution(
+                    validation=execution.validation,
+                    selected_result=None,
+                    selected_native_rectangle=None,
+                    executed_finalist_count=len(spooled),
+                )
+            selected_key, selection = selected.canonical_key, SELECTION_SLICED_WINNER
 
         selected_item = spooled.get(selected_key)
         if selected_item is None:
@@ -373,4 +428,5 @@ def execute_real_sliced_finalists(
             selected_native_rectangle=selected_item.native_rectangle,
             executed_finalist_count=len(spooled),
             selection=selection,
+            deviation_reason=deviation_reason,
         )
