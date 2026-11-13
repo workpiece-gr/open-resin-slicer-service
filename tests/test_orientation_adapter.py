@@ -109,6 +109,7 @@ def _install_fakes(
     monkeypatch,
     *,
     first_islands: int = 0,
+    second_islands: int = 0,
     all_islands: int | None = None,
     bad_project_hash: bool = False,
     malformed_metrics: bool = False,
@@ -124,7 +125,7 @@ def _install_fakes(
         if all_islands is not None:
             islands = all_islands
         else:
-            islands = first_islands if float(orientation.x) == 0 else 0
+            islands = first_islands if float(orientation.x) == 0 else second_islands
         return _artifact(
             orientation,
             islands=islands,
@@ -238,27 +239,31 @@ def test_all_blocked_finalists_return_manual_review_without_retaining_heavy_arti
     assert result.executed_finalist_count == 2
 
 
-def test_all_blocked_finalists_can_fall_back_to_the_best_proxy_orientation(monkeypatch):
-    _install_fakes(monkeypatch, all_islands=1)
-    result = adapter.execute_real_sliced_finalists(
-        proxy_plan=_plan(),
-        source_stl=SOURCE,
-        original_name="part.stl",
-        printer=PRINTER,
-        resin=RESIN,
-        quality=QUALITY,
-        prusa_bin="/opt/prusa",
-        uvtools_cmd="/opt/uvtools",
-        slice_timeout=240,
-        uvtools_timeout=120,
-        fallback_to_proxy_best=True,
+def _execute_with_fallback():
+    return adapter.execute_real_sliced_finalists(
+        proxy_plan=_plan(), source_stl=SOURCE, original_name="part.stl", printer=PRINTER, resin=RESIN, quality=QUALITY,
+        prusa_bin="/opt/prusa", uvtools_cmd="/opt/uvtools", slice_timeout=240, uvtools_timeout=120, fallback_to_proxy_best=True,
     )
+
+
+def test_all_blocked_finalists_take_the_first_one_when_equally_critical(monkeypatch):
+    # Equal counts: ties go to the proxy ranking order, i.e. the best proxy finalist (the old fallback's choice).
+    _install_fakes(monkeypatch, all_islands=1)
+    result = _execute_with_fallback()
     assert result.validation.decision.manual_review_required is True
-    assert result.selection == adapter.SELECTION_PROXY_FALLBACK
+    assert result.selection == adapter.SELECTION_LEAST_CRITICAL
     best_proxy = _plan().screening.finalists[0].candidate.spec.canonical_key
     assert result.selected_result is not None
     assert result.selected_result.artifact.orientation.x == best_proxy[0]
     assert result.selected_native_rectangle is not None
+
+
+def test_all_blocked_finalists_take_the_one_with_the_fewest_critical_issues(monkeypatch):
+    # Issue #15: when no finalist is clean the sliced comparison still has to decide, by the fewest critical issues, not give up to the proxy order.
+    _install_fakes(monkeypatch, first_islands=3, second_islands=1)
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_LEAST_CRITICAL
+    assert result.selected_result.artifact.orientation.x == 15, "the 15 degree finalist (1 critical issue) beats the 0 degree one (3)"
 
 
 def test_native_metric_format_change_fails_closed(monkeypatch):
@@ -289,3 +294,70 @@ def test_source_mismatch_is_rejected_before_real_slicer_runs(monkeypatch):
             uvtools_timeout=120,
         )
     assert slice_calls == []
+
+
+# ---- build orientation rule (opus decision (c), issue #15): the proxy-best finalist wins whenever it is clean -----------------
+
+def test_clean_proxy_best_is_the_build_orientation_even_if_another_finalist_is_clean_too(monkeypatch):
+    _install_fakes(monkeypatch)    # every finalist clean
+    result = _execute_with_fallback()
+    best_proxy = _plan().screening.finalists[0].candidate.spec.canonical_key
+    assert result.selection == adapter.SELECTION_SLICED_WINNER and result.deviation_reason is None
+    assert result.selected_result.artifact.orientation.x == best_proxy[0], "quote = build: the proxy order decides among clean finalists"
+
+
+def test_a_critical_proxy_best_hands_over_to_the_next_clean_finalist_and_says_so(monkeypatch):
+    _install_fakes(monkeypatch, second_islands=2)    # the 15 degree finalist (proxy best) has 2 critical findings, the 0 degree one is clean
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_DEVIATED
+    assert result.selected_result.artifact.orientation.x == 0
+    assert "proxy-best orientation" in result.deviation_reason and "2 critical" in result.deviation_reason and "instant quote" in result.deviation_reason
+
+
+# ---- the finalist's issue report comes from a slice centred on the bed (issue #15, TouchingBound artefact) ---------------------
+
+def test_the_issue_report_is_taken_from_a_single_instance_centred_on_the_bed(monkeypatch):
+    seen = {}
+    printer = Profile(id="p", kind="printer", label="p", candidate_ready=True, production_ready=False, config=Path("/none.ini"),
+                      metadata={"display_width_mm": 82.62, "display_height_mm": 130.56})
+    monkeypatch.setattr(adapter, "printer_flag", lambda p, key: key == "display_mirror_x")
+
+    def fake_materialize(project_bytes, *, source_project_sha256, source_display_envelope, placements):
+        seen["envelope"], seen["placements"] = source_display_envelope, placements
+        return type("M", (), {"bytes": b"centred", "sha256": "c" * 64})()
+
+    def fake_slice(**kwargs):
+        seen["slice"] = kwargs
+        return type("S", (), {"issue_summary": {"islands": 1, "touching_bounds": 0}, "issue_text": "Issues: 1\nIsland, 103, 1px², {}\n"})()
+
+    monkeypatch.setattr(adapter, "materialize_prusa_project_instances", fake_materialize)
+    monkeypatch.setattr(adapter, "slice_materialized_plate_native", fake_slice)
+    artifact = _artifact(Orientation(0, 0, 0))
+    rectangle = adapter.NativeBoundingRectangle(x_mm=38.5, y_mm=66.25, width_mm=44.12, height_mm=26.83)   # the measured raster rectangle
+    summary, text = adapter._centred_issue_report(artifact, rectangle, printer=printer, prusa_bin="/p", uvtools_cmd="/u", slice_timeout=1, uvtools_timeout=1)
+    (placement,) = seen["placements"]
+    assert (placement.target_display_x_mm, placement.target_display_y_mm, placement.rotation_z_deg) == (41.31, 65.28, 0), "the bed centre, one instance"
+    assert (seen["envelope"].min_x_mm, seen["envelope"].max_x_mm, seen["envelope"].min_y_mm, seen["envelope"].max_y_mm) == (0.0, 44.12, 37.48, 64.31), "the same measured conversion the plates use"
+    assert seen["slice"]["project_bytes"] == b"centred" and seen["slice"]["reject_critical"] is False
+    assert summary == {"islands": 1, "touching_bounds": 0} and "Island, 103" in text
+
+
+def test_without_the_measured_mapping_the_finalists_own_report_is_kept(monkeypatch):
+    artifact = _artifact(Orientation(0, 0, 0))
+    rectangle = adapter.NativeBoundingRectangle(x_mm=1, y_mm=1, width_mm=10, height_mm=10)
+    assert adapter._centred_issue_report(artifact, rectangle, printer=PRINTER, prusa_bin="/p", uvtools_cmd="/u", slice_timeout=1, uvtools_timeout=1) is None
+
+
+def test_a_centred_report_replaces_the_finalists_own_issue_counts_in_the_evidence(monkeypatch):
+    _install_fakes(monkeypatch, all_islands=1)
+    monkeypatch.setattr(adapter, "_centred_issue_report", lambda *a, **k: ({"islands": 0, "overhangs": 0, "resin_traps": 0, "suction_cups": 0, "touching_bounds": 0, "empty_layers": 0}, "Issues: 0\n"))
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_SLICED_WINNER, "the centred slices are clean, so no critical-issue fallback"
+
+
+def test_finalists_that_could_not_be_centred_are_listed_so_it_is_visible(monkeypatch):
+    _install_fakes(monkeypatch)    # the fake printer has no measured mapping: every finalist keeps its own report
+    result = _execute_with_fallback()
+    assert len(result.uncentred_finalists) == 2
+    monkeypatch.setattr(adapter, "_centred_issue_report", lambda *a, **k: ({"islands": 0, "overhangs": 0, "resin_traps": 0, "suction_cups": 0, "touching_bounds": 0, "empty_layers": 0}, "Issues: 0\n"))
+    assert _execute_with_fallback().uncentred_finalists == ()
