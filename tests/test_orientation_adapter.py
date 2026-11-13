@@ -353,3 +353,11 @@ def test_a_centred_report_replaces_the_finalists_own_issue_counts_in_the_evidenc
     monkeypatch.setattr(adapter, "_centred_issue_report", lambda *a, **k: ({"islands": 0, "overhangs": 0, "resin_traps": 0, "suction_cups": 0, "touching_bounds": 0, "empty_layers": 0}, "Issues: 0\n"))
     result = _execute_with_fallback()
     assert result.selection == adapter.SELECTION_SLICED_WINNER, "the centred slices are clean, so no critical-issue fallback"
+
+
+def test_finalists_that_could_not_be_centred_are_listed_so_it_is_visible(monkeypatch):
+    _install_fakes(monkeypatch)    # the fake printer has no measured mapping: every finalist keeps its own report
+    result = _execute_with_fallback()
+    assert len(result.uncentred_finalists) == 2
+    monkeypatch.setattr(adapter, "_centred_issue_report", lambda *a, **k: ({"islands": 0, "overhangs": 0, "resin_traps": 0, "suction_cups": 0, "touching_bounds": 0, "empty_layers": 0}, "Issues: 0\n"))
+    assert _execute_with_fallback().uncentred_finalists == ()

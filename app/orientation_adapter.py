@@ -65,6 +65,7 @@ class RealSlicedFinalistExecution:
     executed_finalist_count: int
     selection: str = SELECTION_NONE
     deviation_reason: str | None = None
+    uncentred_finalists: tuple = ()   # canonical keys of finalists whose issue report could NOT be taken from a bed-centred slice
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,7 @@ def execute_real_sliced_finalists(
         raise SlicedFinalistAdapterError("original_name is required for retained artifact provenance.")
 
     spooled: dict[tuple[float, float, float], _SpooledFinalist] = {}
+    uncentred: list[tuple[float, float, float]] = []
     with tempfile.TemporaryDirectory(prefix="workpiece-resin-finalists-") as temp:
         spool_root = Path(temp)
 
@@ -340,6 +342,8 @@ def execute_real_sliced_finalists(
                 artifact, metrics.bounding_rectangle, printer=printer, prusa_bin=prusa_bin, uvtools_cmd=uvtools_cmd,
                 slice_timeout=slice_timeout, uvtools_timeout=uvtools_timeout,
             )
+            if centred_report is None:
+                uncentred.append(key)
             report_summary, report_text = centred_report if centred_report else (artifact.issue_summary, artifact.issue_text)
             try:
                 lift_layers = support_lift_layers(
@@ -410,6 +414,7 @@ def execute_real_sliced_finalists(
                     selected_result=None,
                     selected_native_rectangle=None,
                     executed_finalist_count=len(spooled),
+                    uncentred_finalists=tuple(uncentred),
                 )
             selected_key, selection = selected.canonical_key, SELECTION_SLICED_WINNER
 
@@ -429,4 +434,5 @@ def execute_real_sliced_finalists(
             executed_finalist_count=len(spooled),
             selection=selection,
             deviation_reason=deviation_reason,
+            uncentred_finalists=tuple(uncentred),
         )

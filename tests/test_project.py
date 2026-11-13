@@ -304,3 +304,12 @@ def test_a_plate_with_a_footprint_outside_the_bed_is_refused_with_the_numbers():
     with pytest.raises(project_module.ProjectError, match=r"MATERIALIZE|outside the 82.62 x 130.56 mm bed") as caught:
         project_module._require_footprints_inside_bed(1, placements, rectangle, prepared)
     assert caught.value.code == "MATERIALIZE_FAILED" and "x -15.69..28.43" in str(caught.value)
+
+
+def test_the_project_says_when_finalist_reports_were_not_taken_from_a_centred_slice(client, monkeypatch):
+    # FAILURE MODE (issue #15): TouchingBound noise from the off-centre finalist slice would come back with nobody seeing why.
+    _fake_engines(monkeypatch)
+    response = post(client, quantity=1)
+    assert response.status_code == 200, response.text
+    _, manifest = _unzip(response)
+    assert any("NOT taken from a slice centred on the bed" in w for w in manifest["warnings"])

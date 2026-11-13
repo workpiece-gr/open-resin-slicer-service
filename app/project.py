@@ -306,6 +306,11 @@ def build_order_project(
     selected = sliced.selected_result.artifact
     rectangle = sliced.selected_native_rectangle
     orientation = selected.orientation
+    if sliced.uncentred_finalists:
+        warnings.append(
+            f"{len(sliced.uncentred_finalists)} orientation finalist report(s) were NOT taken from a slice centred on the bed (the printer has no measured bed mapping or the engine refused); "
+            "TouchingBound findings at the plate edge may appear in them and are not real print risks."
+        )
     if sliced.selection == SELECTION_DEVIATED:
         warnings.append(sliced.deviation_reason or "The build orientation differs from the proxy-best orientation the instant quote measured.")
     elif sliced.selection != SELECTION_SLICED_WINNER:
