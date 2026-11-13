@@ -109,6 +109,7 @@ def _install_fakes(
     monkeypatch,
     *,
     first_islands: int = 0,
+    second_islands: int = 0,
     all_islands: int | None = None,
     bad_project_hash: bool = False,
     malformed_metrics: bool = False,
@@ -124,7 +125,7 @@ def _install_fakes(
         if all_islands is not None:
             islands = all_islands
         else:
-            islands = first_islands if float(orientation.x) == 0 else 0
+            islands = first_islands if float(orientation.x) == 0 else second_islands
         return _artifact(
             orientation,
             islands=islands,
@@ -238,27 +239,31 @@ def test_all_blocked_finalists_return_manual_review_without_retaining_heavy_arti
     assert result.executed_finalist_count == 2
 
 
-def test_all_blocked_finalists_can_fall_back_to_the_best_proxy_orientation(monkeypatch):
-    _install_fakes(monkeypatch, all_islands=1)
-    result = adapter.execute_real_sliced_finalists(
-        proxy_plan=_plan(),
-        source_stl=SOURCE,
-        original_name="part.stl",
-        printer=PRINTER,
-        resin=RESIN,
-        quality=QUALITY,
-        prusa_bin="/opt/prusa",
-        uvtools_cmd="/opt/uvtools",
-        slice_timeout=240,
-        uvtools_timeout=120,
-        fallback_to_proxy_best=True,
+def _execute_with_fallback():
+    return adapter.execute_real_sliced_finalists(
+        proxy_plan=_plan(), source_stl=SOURCE, original_name="part.stl", printer=PRINTER, resin=RESIN, quality=QUALITY,
+        prusa_bin="/opt/prusa", uvtools_cmd="/opt/uvtools", slice_timeout=240, uvtools_timeout=120, fallback_to_proxy_best=True,
     )
+
+
+def test_all_blocked_finalists_take_the_first_one_when_equally_critical(monkeypatch):
+    # Equal counts: ties go to the proxy ranking order, i.e. the best proxy finalist (the old fallback's choice).
+    _install_fakes(monkeypatch, all_islands=1)
+    result = _execute_with_fallback()
     assert result.validation.decision.manual_review_required is True
-    assert result.selection == adapter.SELECTION_PROXY_FALLBACK
+    assert result.selection == adapter.SELECTION_LEAST_CRITICAL
     best_proxy = _plan().screening.finalists[0].candidate.spec.canonical_key
     assert result.selected_result is not None
     assert result.selected_result.artifact.orientation.x == best_proxy[0]
     assert result.selected_native_rectangle is not None
+
+
+def test_all_blocked_finalists_take_the_one_with_the_fewest_critical_issues(monkeypatch):
+    # Issue #15: when no finalist is clean the sliced comparison still has to decide, by the fewest critical issues, not give up to the proxy order.
+    _install_fakes(monkeypatch, first_islands=3, second_islands=1)
+    result = _execute_with_fallback()
+    assert result.selection == adapter.SELECTION_LEAST_CRITICAL
+    assert result.selected_result.artifact.orientation.x == 15, "the 15 degree finalist (1 critical issue) beats the 0 degree one (3)"
 
 
 def test_native_metric_format_change_fails_closed(monkeypatch):

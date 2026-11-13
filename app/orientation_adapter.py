@@ -15,6 +15,7 @@ from .engine import (
     Orientation,
     slice_native,
 )
+from .issue_triage import support_lift_layers, triage_issue_summary
 from .orientation_execute import (
     FinalistSliceResult,
     SlicedMeasurements,
@@ -39,6 +40,7 @@ class SlicedFinalistAdapterError(RuntimeError):
 
 
 SELECTION_SLICED_WINNER = "sliced-winner"
+SELECTION_LEAST_CRITICAL = "sliced-least-critical"
 SELECTION_PROXY_FALLBACK = "proxy-best-fallback"
 SELECTION_NONE = "manual-review-required"
 
@@ -206,6 +208,20 @@ def _restore_spooled_artifact(item: _SpooledFinalist) -> NativeArtifact:
     return artifact
 
 
+def _critical_count(evidence) -> int:
+    return (
+        evidence.unresolved_islands + evidence.unresolved_suction_cups + evidence.unresolved_resin_traps
+        + evidence.unresolved_touching_bounds + evidence.unresolved_empty_layers
+    )
+
+
+def fewest_critical_finalist(evidence: Sequence):
+    """The sliced finalist with the fewest critical findings; on a tie the earlier one (the proxy ranking order of ``evidence``)."""
+    if not evidence:
+        raise SlicedFinalistAdapterError("No sliced finalist evidence to choose from.")
+    return min(enumerate(evidence), key=lambda pair: (_critical_count(pair[1]), pair[0]))[1]
+
+
 def execute_real_sliced_finalists(
     *,
     proxy_plan: ProxyOrientationPlan,
@@ -234,6 +250,8 @@ def execute_real_sliced_finalists(
     best proxy-screened finalist is returned instead (``selection`` says so) so an order
     project can still be produced for human review; otherwise ``selected_result`` is None.
     """
+    from .estimate import EstimateError, cycle_profile, mesh_stats   # estimate.py imports this module: import here to avoid the cycle
+
     if not isinstance(source_stl, bytes) or not source_stl:
         raise SlicedFinalistAdapterError("source_stl must contain exact non-empty STL bytes.")
     if not str(original_name).strip():
@@ -279,6 +297,19 @@ def execute_real_sliced_finalists(
                 uvtools_cmd=uvtools_cmd,
                 uvtools_timeout=uvtools_timeout,
             )
+            # UVtools reports one island on the first model layer of any part with a flat underside (it rests on the support tips): information, not a print risk (app/issue_triage.py).
+            try:
+                lift_layers = support_lift_layers(
+                    metrics.z_height_mm,
+                    mesh_stats(source_stl, Orientation(spec.x_deg, spec.y_deg, spec.z_deg)).dims_mm[2],
+                    cycle_profile(resin, artifact.effective_config_bytes).layer_height_mm,
+                )
+            except (EstimateError, ValueError, KeyError):
+                lift_layers = None   # cannot tell where the support region ends: nothing is excused
+            artifact = replace(
+                artifact,
+                issue_summary=triage_issue_summary(artifact.issue_summary, artifact.issue_text, lift_layers=lift_layers),
+            )
             measurements = SlicedMeasurements(
                 source_sha256=artifact.source_sha256,
                 review_project_sha256=artifact.project_sha256,
@@ -316,8 +347,9 @@ def execute_real_sliced_finalists(
             selected_key = selected.canonical_key
             selection = SELECTION_SLICED_WINNER
         elif fallback_to_proxy_best:
-            selected_key = proxy_plan.screening.finalists[0].candidate.spec.canonical_key
-            selection = SELECTION_PROXY_FALLBACK
+            # Every finalist still has critical findings: take the one with the fewest (ties go to the proxy ranking order); the project warns only because THIS winner is still critical.
+            selected_key = fewest_critical_finalist(execution.validation.evidence).canonical_key
+            selection = SELECTION_LEAST_CRITICAL
         else:
             return RealSlicedFinalistExecution(
                 validation=execution.validation,

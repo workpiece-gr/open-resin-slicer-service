@@ -46,6 +46,7 @@ from .engine import (
     critical_issue_count,
 )
 from .estimate import cycle_profile, formula_print_time_seconds, mesh_stats
+from .issue_triage import support_lift_layers, triage_issue_summary
 from .materialized_plate_slice import (
     MaterializedPlateNativeArtifact,
     MaterializedPlateSliceError,
@@ -336,8 +337,8 @@ def build_order_project(
     orientation = selected.orientation
     if sliced.selection != SELECTION_SLICED_WINNER:
         warnings.append(
-            "Every sliced orientation finalist had critical UVtools issues; the best proxy-screened "
-            "orientation was used. Review supports and islands before printing."
+            "Every sliced orientation finalist still had critical UVtools issues; the one with the fewest "
+            "was used. Review supports and islands before printing."
         )
 
     # 2. plate plan on the manufacturing envelope (envelope coordinates, lower-left origin)
@@ -419,7 +420,11 @@ def build_order_project(
         files[issues_name] = issue_text
 
         metrics = artifact.native_metrics
-        critical = critical_issue_count(artifact.issue_summary)
+        plate_issues = triage_issue_summary(
+            artifact.issue_summary, artifact.issue_text,
+            lift_layers=support_lift_layers(metrics.z_height_mm, mesh.dims_mm[2], cycle.layer_height_mm),
+        )
+        critical = critical_issue_count(plate_issues)
         if critical:
             warnings.append(f"Plate {plate.plate_index}: UVtools reported {critical} critical issue(s); review before printing.")
         observed = metrics.bounding_rectangle
@@ -445,7 +450,7 @@ def build_order_project(
                 "print_time_seconds": round(formula_print_time_seconds(cycle, metrics.layer_count), 1),
                 "resin_ml": round(metrics.material_volume_mm3 / 1000.0, 3),
                 "z_height_mm": metrics.z_height_mm,
-                "issues": dict(artifact.issue_summary),
+                "issues": plate_issues,
                 "observed_footprint_mm": {
                     "x": observed.x_mm,
                     "y": observed.y_mm,
