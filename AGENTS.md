@@ -2,7 +2,7 @@
 
 How we work (reviews, CI, merging, publishing, evaluations, wording) is written once, in `docs/SYSTEM_MAP.md` section 0 of the private `workpiece-gr/workpiece-web` repository: read it first. This repository is public: never put host details, credentials, addresses or customer data here.
 
-Before substantive changes read `README.md`, `docs/ARCHITECTURE.md` and `docs/UPSTREAM.md.
+Before substantive changes read `README.md`, `docs/ARCHITECTURE.md` and `docs/UPSTREAM.md`.
 
 This repository's own rules:
 
