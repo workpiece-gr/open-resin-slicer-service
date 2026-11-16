@@ -1,3 +1,5 @@
+> **ARCHIVED 2026-11-16: superseded by the Workpiece working agreement, `docs/SYSTEM_MAP.md` section 0 "How we work" in the private `workpiece-gr/workpiece-web` repository** (merging, CI, publishing, evaluations, wording). The 25-minute Codex-era protocol below is kept for history; do not follow it.
+
 # Bounded agent execution protocol
 
 **Audience:** future chats, Codex, coding agents and human developers. Read this after `AGENTS.md` and before substantial work. This is an execution protocol, not a replacement for project-specific engineering, safety, release or licensing requirements.
