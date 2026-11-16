@@ -46,6 +46,7 @@ from .engine import (
     critical_issue_count,
 )
 from .estimate import cycle_profile, formula_print_time_seconds, mesh_stats
+from .issue_triage import support_lift_layers, triage_issue_summary
 from .materialized_plate_slice import (
     MaterializedPlateNativeArtifact,
     MaterializedPlateSliceError,
@@ -53,6 +54,7 @@ from .materialized_plate_slice import (
 )
 from .orientation import OrientationPlanError
 from .orientation_adapter import (
+    SELECTION_DEVIATED,
     SELECTION_SLICED_WINNER,
     SlicedFinalistAdapterError,
     execute_real_sliced_finalists,
@@ -62,6 +64,7 @@ from .orientation_pipeline import build_proxy_orientation_plan
 from .orientation_proxy import OrientationProxyError
 from .orientation_screen import DEFAULT_PROXY_FINALISTS, OrientationScreenError
 from .orientation_sliced import SlicedOrientationValidationError
+from .bed_frame import BedFrameError, bed_envelope_from_native_rectangle as _bed_envelope, printer_flag
 from .placement import Envelope2D
 from .plate import PlatePlanError, plan_printer_profile_instances
 from .profiles import ManufacturingEnvelope, Profile, ProfileError, ProfileRegistry
@@ -198,49 +201,18 @@ def _file_record(name: str, data: bytes) -> dict:
 
 
 def _printer_flag(printer: Profile, key: str) -> bool:
-    """A boolean printer setting (``display_mirror_x = 1``) from the printer's PrusaSlicer ini."""
     try:
-        for line in printer.config.read_text(encoding="utf-8").splitlines():
-            name, separator, value = line.partition("=")
-            if separator and name.strip() == key:
-                return value.strip() == "1"
-    except OSError as exc:
-        raise ProjectError("UNSUPPORTED_PROFILE", f"Cannot read the printer configuration: {exc}") from exc
-    return False
+        return printer_flag(printer, key)
+    except BedFrameError as exc:
+        raise ProjectError("UNSUPPORTED_PROFILE", str(exc)) from exc
 
 
-def bed_envelope_from_native_rectangle(
-    rectangle,
-    *,
-    bed_width_mm: float,
-    bed_depth_mm: float,
-    mirror_x: bool,
-    mirror_y: bool,
-) -> Envelope2D:
-    """The measured cured footprint as a rectangle in PrusaSlicer bed millimetres (lower-left origin).
-
-    UVtools reports the whole-print rectangle in raster ("display") millimetres: the origin is the top-left
-    pixel and Y grows downward, and the printer's ``display_mirror_x`` mirrors the raster horizontally. The
-    PrusaSlicer bed (and every 3MF build-item transform) has its origin at the lower-left corner with Y growing
-    upward. Measured on a real Mars 2 project (``display_mirror_x = 1``, ``display_mirror_y = 0``, 2026-11-12):
-    the cured footprint seen in the raster at x 38.5..82.62, y 66.25..93.08 belongs to an object whose 3MF
-    centre is at bed (21.31, 50.28), so ``display_x = bed_width - bed_x`` and ``display_y = bed_depth - bed_y``.
-    Only that combination has been measured; any other combination is refused rather than guessed.
-
-    The footprint is NOT assumed to be centred on the bed: PrusaSlicer's exported item sits wherever its
-    placement put it, and supports and the pad shift the cured rectangle against the mesh.
-    """
-    if not mirror_x or mirror_y:
-        raise ProjectError(
-            "UNSUPPORTED_PROFILE",
-            "The bed-to-raster mapping is only measured for printers with display_mirror_x = 1 and display_mirror_y = 0.",
-        )
-    return Envelope2D(
-        min_x_mm=round(bed_width_mm - rectangle.max_x_mm, 6),
-        max_x_mm=round(bed_width_mm - rectangle.x_mm, 6),
-        min_y_mm=round(bed_depth_mm - rectangle.max_y_mm, 6),
-        max_y_mm=round(bed_depth_mm - rectangle.y_mm, 6),
-    )
+def bed_envelope_from_native_rectangle(rectangle, *, bed_width_mm: float, bed_depth_mm: float, mirror_x: bool, mirror_y: bool) -> Envelope2D:
+    """See ``bed_frame.bed_envelope_from_native_rectangle`` (the measured raster-to-bed conversion); unsupported mirrors are a project error."""
+    try:
+        return _bed_envelope(rectangle, bed_width_mm=bed_width_mm, bed_depth_mm=bed_depth_mm, mirror_x=mirror_x, mirror_y=mirror_y)
+    except BedFrameError as exc:
+        raise ProjectError("UNSUPPORTED_PROFILE", str(exc)) from exc
 
 
 def _require_footprints_inside_bed(plate_index, placements, rectangle, prepared: ProjectInput) -> None:
@@ -334,10 +306,17 @@ def build_order_project(
     selected = sliced.selected_result.artifact
     rectangle = sliced.selected_native_rectangle
     orientation = selected.orientation
-    if sliced.selection != SELECTION_SLICED_WINNER:
+    if sliced.uncentred_finalists:
         warnings.append(
-            "Every sliced orientation finalist had critical UVtools issues; the best proxy-screened "
-            "orientation was used. Review supports and islands before printing."
+            f"{len(sliced.uncentred_finalists)} orientation finalist report(s) were NOT taken from a slice centred on the bed (the printer has no measured bed mapping or the engine refused); "
+            "TouchingBound findings at the plate edge may appear in them and are not real print risks."
+        )
+    if sliced.selection == SELECTION_DEVIATED:
+        warnings.append(sliced.deviation_reason or "The build orientation differs from the proxy-best orientation the instant quote measured.")
+    elif sliced.selection != SELECTION_SLICED_WINNER:
+        warnings.append(
+            "Every sliced orientation finalist still had critical UVtools issues; the one with the fewest "
+            "was used. Review supports and islands before printing."
         )
 
     # 2. plate plan on the manufacturing envelope (envelope coordinates, lower-left origin)
@@ -419,7 +398,11 @@ def build_order_project(
         files[issues_name] = issue_text
 
         metrics = artifact.native_metrics
-        critical = critical_issue_count(artifact.issue_summary)
+        plate_issues = triage_issue_summary(
+            artifact.issue_summary, artifact.issue_text,
+            lift_layers=support_lift_layers(metrics.z_height_mm, mesh.dims_mm[2], cycle.layer_height_mm),
+        )
+        critical = critical_issue_count(plate_issues)
         if critical:
             warnings.append(f"Plate {plate.plate_index}: UVtools reported {critical} critical issue(s); review before printing.")
         observed = metrics.bounding_rectangle
@@ -445,7 +428,7 @@ def build_order_project(
                 "print_time_seconds": round(formula_print_time_seconds(cycle, metrics.layer_count), 1),
                 "resin_ml": round(metrics.material_volume_mm3 / 1000.0, 3),
                 "z_height_mm": metrics.z_height_mm,
-                "issues": dict(artifact.issue_summary),
+                "issues": plate_issues,
                 "observed_footprint_mm": {
                     "x": observed.x_mm,
                     "y": observed.y_mm,
@@ -497,6 +480,7 @@ def build_order_project(
             "deg": {"x": orientation.x, "y": orientation.y, "z": orientation.z},
             "selection": sliced.selection,
             "finalists_sliced": sliced.executed_finalist_count,
+            **({"reason": sliced.deviation_reason} if sliced.deviation_reason else {}),
         },
         "part": {
             "model_volume_ml": round(mesh.volume_mm3 / 1000.0, 3),
